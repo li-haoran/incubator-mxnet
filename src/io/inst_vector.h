@@ -18,6 +18,7 @@
  */
 
 /*!
+ *  Copyright (c) 2015 by Contributors
  * \file inst_vector.h
  * \brief holder of a sequence of DataInst in CPU
  *        that are not necessarily of same shape
@@ -28,6 +29,7 @@
 
 #include <mxnet/io.h>
 #include <mxnet/base.h>
+#include <mxnet/tensor_blob.h>
 #include <dmlc/base.h>
 #include <mshadow/tensor.h>
 #include <vector>

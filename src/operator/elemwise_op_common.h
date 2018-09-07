@@ -18,6 +18,7 @@
  */
 
 /*!
+* Copyright (c) 2016 by Contributors
 * \file elemwise_op_common.h
 * \brief common function used for broadcasting and reducing
 * \author Xingjian Shi
@@ -70,6 +71,16 @@ inline bool ElemwiseStorageAttr(const nnvm::NodeAttrs& attrs,
   if (!dispatched && csr && common::ContainsOnlyStorage(*in_attrs, kCSRStorage)) {
     // csr, csr, ... -> csr
     dispatched = storage_type_assign(out_attrs, kCSRStorage,
+                                     dispatch_mode, dispatch_ex);
+  }
+  if (!dispatched && in_attrs->size() == 3U && in_attrs->at(0) == kDefaultStorage &&
+      in_attrs->at(1) == kCSRStorage && in_attrs->at(2) == kDefaultStorage) {
+    dispatched = storage_type_assign(out_attrs, kDefaultStorage,
+                                     dispatch_mode, dispatch_ex);
+  }
+  if (!dispatched && in_attrs->size() > 4U && ContainsStorageType(*in_attrs, kDefaultStorage)) {
+    // *, dense, * -> dense
+    dispatched = storage_type_assign(out_attrs, kDefaultStorage,
                                      dispatch_mode, dispatch_ex);
   }
   if (!dispatched) {
@@ -227,8 +238,9 @@ struct CloneGradient {
     std::vector<nnvm::NodeEntry> ret;
     const size_t input_count = n->inputs.size();
     ret.reserve(input_count);
-    for (size_t i = 0; i < input_count; ++i)
+    for (size_t i = 0; i < input_count; ++i) {
       ret.emplace_back(ograds[0]);
+    }
     return ret;
   }
 };

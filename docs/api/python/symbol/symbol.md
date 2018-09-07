@@ -143,7 +143,21 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.sqrt
     Symbol.rsqrt
+    Symbol.cbrt
+    Symbol.rcbrt
     Symbol.square
+```
+
+## Basic neural network functions
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    Symbol.relu
+    Symbol.sigmoid
+    Symbol.softmax
+    Symbol.log_softmax
 ```
 
 #### Comparison operators
@@ -168,6 +182,7 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.zeros_like
     Symbol.ones_like
+    Symbol.diag
 ```
 
 ### Changing shape and type
@@ -177,7 +192,10 @@ Composite multiple symbols into a new one by an operator.
     :nosignatures:
 
     Symbol.astype
+    Symbol.shape_array
+    Symbol.size_array
     Symbol.reshape
+    Symbol.reshape_like
     Symbol.flatten
     Symbol.expand_dims
 ```
@@ -190,6 +208,7 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.broadcast_to
     Symbol.broadcast_axes
+    Symbol.broadcast_like
     Symbol.tile
     Symbol.pad
 ```
@@ -203,6 +222,8 @@ Composite multiple symbols into a new one by an operator.
     Symbol.transpose
     Symbol.swapaxes
     Symbol.flip
+    Symbol.depth_to_space
+    Symbol.space_to_depth
 ```
 
 ### Reduce functions
@@ -246,6 +267,7 @@ Composite multiple symbols into a new one by an operator.
     Symbol.topk
     Symbol.argmax
     Symbol.argmin
+    Symbol.argmax_channel
 ```
 
 ### Query information
@@ -271,9 +293,12 @@ Composite multiple symbols into a new one by an operator.
 
     Symbol.slice
     Symbol.slice_axis
+    Symbol.slice_like
     Symbol.take
     Symbol.one_hot
     Symbol.pick
+    Symbol.ravel_multi_index
+    Symbol.unravel_index
 ```
 
 ### Get internal and output symbol
@@ -354,9 +379,13 @@ Composite multiple symbols into a new one by an operator.
     :nosignatures:
 
     cast
+    shape_array
+    size_array
     reshape
+    reshape_like
     flatten
     expand_dims
+    diag
 ```
 
 ### Expanding elements
@@ -367,6 +396,7 @@ Composite multiple symbols into a new one by an operator.
 
     broadcast_to
     broadcast_axes
+    broadcast_like
     repeat
     tile
     pad
@@ -381,6 +411,8 @@ Composite multiple symbols into a new one by an operator.
     transpose
     swapaxes
     flip
+    depth_to_space
+    space_to_depth
 ```
 
 ### Joining and splitting symbols
@@ -391,6 +423,7 @@ Composite multiple symbols into a new one by an operator.
 
     concat
     split
+    stack
 ```
 
 ### Indexing routines
@@ -401,6 +434,7 @@ Composite multiple symbols into a new one by an operator.
 
     slice
     slice_axis
+    slice_like
     take
     batch_take
     one_hot
@@ -424,7 +458,6 @@ Composite multiple symbols into a new one by an operator.
     broadcast_div
     broadcast_mod
     negative
-    reciprocal
     dot
     batch_dot
     add_n
@@ -492,7 +525,6 @@ Composite multiple symbols into a new one by an operator.
     trunc
 ```
 
-
 ### Exponents and logarithms
 
 ```eval_rst
@@ -519,9 +551,10 @@ Composite multiple symbols into a new one by an operator.
     cbrt
     rcbrt
     square
+    reciprocal
 ```
 
-### Logic functions
+### Comparison
 
 ```eval_rst
 .. autosummary::
@@ -534,19 +567,34 @@ Composite multiple symbols into a new one by an operator.
     broadcast_lesser
     broadcast_lesser_equal
 ```
+
+### Logical
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    broadcast_logical_and
+    broadcast_logical_or
+    broadcast_logical_xor
+    broadcast_logical_not
+```
+
 ### Random sampling
 
 ```eval_rst
 .. autosummary::
     :nosignatures:
 
-    sample_uniform
-    sample_normal
-    sample_gamma
-    sample_exponential
-    sample_poisson
-    sample_negative_binomial
-    sample_generalized_negative_binomial
+    mxnet.symbol.random.uniform
+    mxnet.symbol.random.normal
+    mxnet.symbol.random.gamma
+    mxnet.symbol.random.exponential
+    mxnet.symbol.random.poisson
+    mxnet.symbol.random.negative_binomial
+    mxnet.symbol.random.generalized_negative_binomial
+    mxnet.symbol.random.multinomial
+    mxnet.symbol.random.shuffle
     mxnet.random.seed
 ```
 
@@ -561,6 +609,17 @@ Composite multiple symbols into a new one by an operator.
     argsort
     argmax
     argmin
+```
+
+### Sequence operation
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    SequenceLast
+    SequenceMask
+    SequenceReverse
 ```
 
 ### Miscellaneous
@@ -596,6 +655,8 @@ Composite multiple symbols into a new one by an operator.
     SoftmaxOutput
     softmax
     log_softmax
+    relu
+    sigmoid
 ```
 
 ### More
@@ -610,6 +671,7 @@ Composite multiple symbols into a new one by an operator.
     Embedding
     LeakyReLU
     InstanceNorm
+    LayerNorm
     L2Normalization
     LRN
     ROIPooling

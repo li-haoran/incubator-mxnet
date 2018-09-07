@@ -1,3 +1,4 @@
+from __future__ import print_function
 # Licensed to the Apache Software Foundation (ASF) under one
 # or more contributor license agreements.  See the NOTICE file
 # distributed with this work for additional information
@@ -20,6 +21,9 @@ import copy
 import json
 import ast
 
+from six.moves import xrange
+
+
 def load_model(args):
   devs = mx.cpu() if args.gpus == None else [mx.gpu(int(i)) for i in args.gpus.split(',')]
   return mx.model.FeedForward.load(args.model, args.load_epoch, ctx=devs)
@@ -29,7 +33,7 @@ def topsort(nodes):
   deg = [0]*n
   g = [[] for _ in xrange(n)]
   for i,node in enumerate(nodes):
-    if node.has_key('inputs'):
+    if 'inputs' in node:
       for j in node['inputs']:
         deg[i] += 1
         g[j[0]].append(i)
@@ -45,7 +49,7 @@ def topsort(nodes):
         q.append(j)
   new_ids=dict([(node['name'],i) for i,node in enumerate(res)])
   for node in res:
-    if node.has_key('inputs'):
+    if 'inputs' in node:
       for j in node['inputs']:
         j[0]=new_ids[nodes[j[0]]['name']]
   return res
@@ -61,7 +65,7 @@ def sym_factory(node, data):
     for k, v in node['param'].items():
       try:
         params[k] = ast.literal_eval(v)
-      except ValueError, e:
+      except ValueError as e:
         params[k] = v
   return getattr(mx.symbol, node['op'])(data=data, name=name, **params)
 
@@ -82,8 +86,8 @@ def replace_conv_layer(layer_name, old_model, sym_handle, arg_handle):
                                   if not input_node['name'].startswith(node['name'])]
       try:
         data=sym_dict[datas[0]]
-      except Exception, e:
-        print 'can not find symbol %s'%(datas[0])
+      except Exception as e:
+        print('can not find symbol %s'%(datas[0]))
         raise e
       if node['name'] == layer_name:
         sym = sym_handle(data, node)
@@ -100,7 +104,7 @@ def replace_conv_layer(layer_name, old_model, sym_handle, arg_handle):
     arg_shape_dic = dict(zip(arg_names, arg_shapes))
     try:
       arg_handle(arg_shape_dic, arg_params)
-    except Exception, e:
+    except Exception as e:
       raise Exception('Exception in arg_handle')
 
   new_model = mx.model.FeedForward(

@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2016 by Contributors
  * \file pad-inl.h
  * \brief
  * \author Sebastian Bodenstien
@@ -186,6 +187,17 @@ class PadProp : public OperatorProperty {
 
   std::map<std::string, std::string> GetParams() const override {
     return param_.__DICT__();
+  }
+
+  bool InferType(std::vector<int> *in_type,
+                 std::vector<int> *out_type,
+                 std::vector<int> *aux_type) const override {
+    int dtype = (*in_type)[0];
+    type_assign(&dtype, (*out_type)[0]);
+
+    TYPE_ASSIGN_CHECK(*in_type, 0, dtype);
+    TYPE_ASSIGN_CHECK(*out_type, 0, dtype);
+    return dtype != -1;
   }
 
   bool InferShape(std::vector<TShape> *in_shape, std::vector<TShape> *out_shape,

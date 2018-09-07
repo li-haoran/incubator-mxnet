@@ -26,6 +26,7 @@ import warnings
 
 from .. import context as ctx
 from .. import optimizer as opt
+from .. import ndarray as nd
 
 from .executor_group import DataParallelExecutorGroup
 from ..model import _create_kvstore, _initialize_kvstore, _update_params, _update_params_on_kvstore
@@ -59,10 +60,19 @@ class Module(BaseModule):
     state_names : list of str
         states are similar to data and label, but not provided by data iterator.
         Instead they are initialized to 0 and can be set by `set_states()`.
+    group2ctxs : dict of str to context or list of context,
+                 or list of dict of str to context
+        Default is `None`. Mapping the `ctx_group` attribute to the context assignment.
+    compression_params : dict
+        Specifies type of gradient compression and additional arguments depending
+        on the type of compression being used. For example, 2bit compression requires a threshold.
+        Arguments would then be {'type':'2bit', 'threshold':0.5}
+        See mxnet.KVStore.set_gradient_compression method for more details on gradient compression.
     """
     def __init__(self, symbol, data_names=('data',), label_names=('softmax_label',),
                  logger=logging, context=ctx.cpu(), work_load_list=None,
-                 fixed_param_names=None, state_names=None):
+                 fixed_param_names=None, state_names=None, group2ctxs=None,
+                 compression_params=None):
         super(Module, self).__init__(logger=logger)
 
         if isinstance(context, ctx.Context):
@@ -72,6 +82,8 @@ class Module(BaseModule):
             work_load_list = [1] * len(self._context)
         assert len(work_load_list) == len(self._context)
         self._work_load_list = work_load_list
+
+        self._group2ctxs = group2ctxs
 
         self._symbol = symbol
 
@@ -99,6 +111,7 @@ class Module(BaseModule):
         self._aux_params = None
         self._params_dirty = False
 
+        self._compression_params = compression_params
         self._optimizer = None
         self._kvstore = None
         self._update_on_kvstore = None
@@ -291,11 +304,11 @@ class Module(BaseModule):
                 initializer(name, arr)
 
         attrs = self._symbol.attr_dict()
-        for name, arr in self._arg_params.items():
+        for name, arr in sorted(self._arg_params.items()):
             desc = InitDesc(name, attrs.get(name, None))
             _impl(desc, arr, arg_params)
 
-        for name, arr in self._aux_params.items():
+        for name, arr in sorted(self._aux_params.items()):
             desc = InitDesc(name, attrs.get(name, None))
             _impl(desc, arr, aux_params)
 
@@ -385,7 +398,6 @@ class Module(BaseModule):
 
         self.for_training = for_training
         self.inputs_need_grad = inputs_need_grad
-        self.binded = True
         self._grad_req = grad_req
 
         if not for_training:
@@ -413,7 +425,7 @@ class Module(BaseModule):
                                                      for_training, inputs_need_grad,
                                                      shared_group, logger=self.logger,
                                                      fixed_param_names=self._fixed_param_names,
-                                                     grad_req=grad_req,
+                                                     grad_req=grad_req, group2ctxs=self._group2ctxs,
                                                      state_names=self._state_names)
         self._total_exec_bytes = self._exec_group._total_exec_bytes
         if shared_module is not None:
@@ -440,6 +452,8 @@ class Module(BaseModule):
 
         if shared_module is not None and shared_module.optimizer_initialized:
             self.borrow_optimizer(shared_module)
+
+        self.binded = True
 
     def reshape(self, data_shapes, label_shapes=None):
         """Reshapes the module for new input shapes.
@@ -521,15 +535,18 @@ class Module(BaseModule):
         self._updater = None
 
         if kvstore:
+            if self._compression_params:
+                kvstore.set_gradient_compression(self._compression_params)
+            if update_on_kvstore:
+                kvstore.set_optimizer(self._optimizer)
             # copy initialized local parameters to kvstore
             _initialize_kvstore(kvstore=kvstore,
                                 param_arrays=self._exec_group.param_arrays,
                                 arg_params=self._arg_params,
                                 param_names=self._param_names,
                                 update_on_kvstore=update_on_kvstore)
-        if update_on_kvstore:
-            kvstore.set_optimizer(self._optimizer)
-        else:
+
+        if not update_on_kvstore:
             self._updater = opt.get_updater(optimizer)
 
         self.optimizer_initialized = True
@@ -574,7 +591,19 @@ class Module(BaseModule):
         assert self.binded and self.params_initialized
 
         curr_data_shapes = tuple(i.shape for i in self._data_shapes)
-        new_data_shapes = tuple(i.shape for i in data_batch.data)
+        if isinstance(data_batch, list):
+            assert data_batch is not None, "Encountered empty data batch"
+            new_data_shapes = []
+            for i in range(len(data_batch[0].data)):
+                shape = data_batch[0].data[i].shape
+                for db in data_batch:
+                    assert shape == db.data[i].shape, \
+                        "All data batches in a list need to have the same shape"
+                new_batch_size = len(data_batch) * shape[0]
+                new_data_shapes.append((new_batch_size,) + shape[1:])
+            new_data_shapes = tuple(new_data_shapes)
+        else:
+            new_data_shapes = tuple(i.shape for i in data_batch.data)
 
         if curr_data_shapes != new_data_shapes:
             if hasattr(data_batch, "provide_data") and data_batch.provide_data:
@@ -615,6 +644,12 @@ class Module(BaseModule):
     def update(self):
         """Updates parameters according to the installed optimizer and the gradients computed
         in the previous forward-backward batch.
+
+        When KVStore is used to update parameters for multi-device or multi-machine training,
+        a copy of the parameters are stored in KVStore. Note that for `row_sparse` parameters,
+        this function does update the copy of parameters in KVStore, but doesn't broadcast the
+        updated parameters to all devices / machines. Please call `prepare` to broadcast
+        `row_sparse` parameters with the next batch of data.
 
         See Also
         ----------
@@ -719,7 +754,7 @@ class Module(BaseModule):
         assert self.binded and self.params_initialized
         self._exec_group.set_states(states, value)
 
-    def update_metric(self, eval_metric, labels):
+    def update_metric(self, eval_metric, labels, pre_sliced=False):
         """Evaluates and accumulates evaluation metric on outputs of the last forward computation.
 
         See Also
@@ -729,17 +764,28 @@ class Module(BaseModule):
         Parameters
         ----------
         eval_metric : EvalMetric
-        labels : list of NDArray
-            Typically ``data_batch.label``.
+            Evaluation metric to use.
+        labels : list of NDArray if `pre_sliced` parameter is set to `False`,
+            list of lists of NDArray otherwise. Typically `data_batch.label`.
+        pre_sliced: bool
+            Whether the labels are already sliced per device (default: False).
         """
-        self._exec_group.update_metric(eval_metric, labels)
+        self._exec_group.update_metric(eval_metric, labels, pre_sliced)
 
     def _sync_params_from_devices(self):
         """Synchronizes parameters from devices to CPU. This function should be called after
         calling `update` that updates the parameters on the devices, before one can read the
         latest parameters from ``self._arg_params`` and ``self._aux_params``.
+
+        For row_sparse parameters on devices, ther are pulled from KVStore with all row ids.
+
         """
         self._exec_group.get_params(self._arg_params, self._aux_params)
+        if self._kvstore and self._update_on_kvstore:
+            for param_name, param_val in sorted(self._arg_params.items()):
+                if param_val.stype == 'row_sparse':
+                    row_ids = nd.arange(0, param_val.shape[0], dtype='int64')
+                    self._kvstore.row_sparse_pull(param_name, param_val, row_ids=row_ids)
         self._params_dirty = False
 
     def save_optimizer_states(self, fname):
@@ -777,3 +823,46 @@ class Module(BaseModule):
         """Installs monitor on all executors. """
         assert self.binded
         self._exec_group.install_monitor(mon)
+
+    def prepare(self, data_batch, sparse_row_id_fn=None):
+        '''Prepares the module for processing a data batch.
+
+        Usually involves switching bucket and reshaping.
+        For modules that contain `row_sparse` parameters in KVStore,
+        it prepares the `row_sparse` parameters based on the sparse_row_id_fn.
+
+        When KVStore is used to update parameters for multi-device or multi-machine training,
+        a copy of the parameters are stored in KVStore. Note that for `row_sparse` parameters,
+        the `update()` updates the copy of parameters in KVStore, but doesn't broadcast
+        the updated parameters to all devices / machines. The `prepare` function is used to
+        broadcast `row_sparse` parameters with the next batch of data.
+
+        Parameters
+        ----------
+        data_batch : DataBatch
+            The current batch of data for forward computation.
+
+        sparse_row_id_fn : A callback function
+            The function  takes `data_batch` as an input and returns a dict of
+            str -> NDArray. The resulting dict is used for pulling row_sparse
+            parameters from the kvstore, where the str key is the name of the param,
+            and the value is the row id of the param to pull.
+        '''
+        assert self.binded
+        if sparse_row_id_fn is not None:
+            if not self._kvstore or not self._update_on_kvstore:
+                warnings.warn(UserWarning("Parameters are not updated in the KVStore. "
+                                          "No need to call sparse_row_id_fn."))
+            else:
+                row_ids = sparse_row_id_fn(data_batch)
+                assert(isinstance(row_ids, dict)), "Expected dict output from sparse_row_id_fn"
+                for param_name, row_id in row_ids.items():
+                    param_idx = self._exec_group.param_names.index(param_name)
+                    param_val = self._exec_group.param_arrays[param_idx]
+                    assert(isinstance(param_val, (tuple, list)))
+                    if param_val[0].stype != 'row_sparse':
+                        warnings.warn(UserWarning("%s.stype is not 'row_sparse'. No need to "
+                                                  "perform row_sparse_pull." % param_name))
+                    else:
+                        self._kvstore.row_sparse_pull(param_name, param_val, row_ids=row_id,
+                                                      priority=-param_idx)

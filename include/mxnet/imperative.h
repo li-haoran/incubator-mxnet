@@ -28,6 +28,8 @@
 #include <nnvm/graph.h>
 #include <vector>
 #include <atomic>
+#include <utility>
+#include <string>
 #include <unordered_map>
 
 #include "./ndarray.h"
@@ -74,56 +76,6 @@ class Imperative {
       return info.grad_req != kNullOp && info.outputs.size() == 1
              && info.out_grads.size() == 1;
     }
-  };
-  class CachedOp {
-   public:
-    explicit CachedOp(const nnvm::Symbol& sym);
-    uint32_t num_inputs() {
-      return fwd_graph_.indexed_graph().input_nodes().size();
-    }
-    uint32_t num_outputs() {
-      return fwd_graph_.outputs.size();
-    }
-    uint32_t num_backward_inputs() {
-      return bwd_ograd_dep_.size() + bwd_in_dep_.size() + bwd_out_dep_.size();
-    }
-    std::vector<bool>& save_inputs() {
-      return save_inputs_;
-    }
-    std::vector<bool>& save_outputs() {
-      return save_outputs_;
-    }
-    const std::unordered_set<uint32_t>& mutable_input_nodes() {
-      return fwd_graph_.indexed_graph().mutable_input_nodes();
-    }
-    nnvm::Graph GetForwardGraph(const bool recording,
-                                const std::vector<NDArray*>& inputs);
-    nnvm::Graph GetBackwardGraph(const OpStatePtr& state,
-                                 const std::vector<OpReqType>& reqs,
-                                 const std::vector<NDArray*>& inputs);
-    std::vector<nnvm::NodeEntry> Gradient(const nnvm::NodePtr& node,
-                                          const std::vector<nnvm::NodeEntry>& ograds);
-    OpStatePtr Forward(const std::vector<NDArray*>& inputs,
-                       const std::vector<NDArray*>& outputs);
-    void Backward(const bool retain_graph,
-                  const OpStatePtr& state,
-                  const std::vector<NDArray*>& inputs,
-                  const std::vector<OpReqType>& reqs,
-                  const std::vector<NDArray*>& outputs);
-
-   private:
-    struct CachedOpState {
-      std::vector<NDArray> buff;
-      std::vector<OpStatePtr> states;
-    };
-    std::mutex mutex_;
-    nnvm::Graph fwd_graph_;
-    nnvm::Graph grad_graph_;
-    nnvm::Graph full_graph_;
-    std::vector<bool> curr_grad_req_;
-    std::vector<uint32_t> bwd_in_dep_, bwd_out_dep_, bwd_ograd_dep_;
-    std::vector<uint32_t> bwd_input_eid_;
-    std::vector<bool> save_inputs_, save_outputs_;
   };
   /*! \brief whether operator recording is on. */
   bool is_training() const {
@@ -181,22 +133,17 @@ class Imperative {
  private:
   friend class NDArray;
   /*! \brief make constructor protected. */
-  Imperative() {}
+  Imperative() {
+    if (dmlc::GetEnv("MXNET_EXEC_BULK_EXEC_TRAIN", 1)) {
+      backward_bulk_size_ =  dmlc::GetEnv("MXNET_EXEC_BULK_EXEC_MAX_NODE_TRAIN", 15);
+    }
+  }
   /*! \brief find the input/output ndarrays that are needed for backward */
   void GetBackwardDependency(
       const nnvm::NodePtr& node,
       uint32_t num_inputs, uint32_t num_outputs,
       std::vector<bool> *p_save_inputs,
       std::vector<bool> *p_save_outputs);
-  void RunGraph(
-      const bool retain_graph,
-      const nnvm::IndexedGraph& idx,
-      const std::vector<NDArray*> arrays,
-      size_t node_start, size_t node_end,
-      std::vector<OpReqType>&& array_reqs,
-      std::vector<uint32_t>&& ref_count,
-      std::vector<OpStatePtr> *p_states,
-      const DispatchModeVector& dispatch_modes);
   /*! \brief indicate whether is training. */
 #if DMLC_CXX11_THREAD_LOCAL
   static thread_local bool is_train_;
@@ -209,9 +156,9 @@ class Imperative {
   std::atomic<uint64_t> node_count_{0};
   /*! \brief variable count used for naming */
   std::atomic<uint64_t> variable_count_{0};
+  /*! \brief default backward bulk size */
+  int backward_bulk_size_{0};
 };
-
-using CachedOpPtr = std::shared_ptr<Imperative::CachedOp>;
 
 }  // namespace mxnet
 #endif  // MXNET_IMPERATIVE_H_

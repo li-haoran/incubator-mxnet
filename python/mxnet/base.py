@@ -16,54 +16,88 @@
 # under the License.
 
 # coding: utf-8
-# pylint: disable=invalid-name, no-member
+# pylint: disable=invalid-name, no-member, trailing-comma-tuple, bad-mcs-classmethod-argument
 """ctypes library of mxnet and helper functions."""
 from __future__ import absolute_import
 
+import atexit
+import ctypes
 import os
 import sys
-import ctypes
-import atexit
-import warnings
 import inspect
+import platform
 import numpy as np
+
 from . import libinfo
-warnings.filterwarnings('default', category=DeprecationWarning)
 
 __all__ = ['MXNetError']
 #----------------------------
 # library loading
 #----------------------------
-if sys.version_info[0] == 3:
-    string_types = str,
-    numeric_types = (float, int, np.generic)
-    integer_types = int
+
+# pylint: disable=pointless-statement
+try:
+    basestring
+    long
+except NameError:
+    basestring = str
+    long = int
+# pylint: enable=pointless-statement
+
+integer_types = (int, long, np.int32, np.int64)
+numeric_types = (float, int, long, np.generic)
+string_types = basestring,
+
+if sys.version_info[0] > 2:
     # this function is needed for python3
     # to convert ctypes.char_p .value back to python str
     py_str = lambda x: x.decode('utf-8')
 else:
-    string_types = basestring,
-    numeric_types = (float, int, long, np.generic)
-    integer_types = (int, long)
     py_str = lambda x: x
+
+
+def data_dir_default():
+    """
+
+    :return: default data directory depending on the platform and environment variables
+    """
+    system = platform.system()
+    if system == 'Windows':
+        return os.path.join(os.environ.get('APPDATA'), 'mxnet')
+    else:
+        return os.path.join(os.path.expanduser("~"), '.mxnet')
+
+
+def data_dir():
+    """
+
+    :return: data directory in the filesystem for storage, for example when downloading models
+    """
+    return os.getenv('MXNET_HOME', data_dir_default())
+
 
 class _NullType(object):
     """Placeholder for arguments"""
     def __repr__(self):
         return '_Null'
 
+
 _Null = _NullType()
+
 
 class MXNetError(Exception):
     """Error that will be throwed by all mxnet functions."""
     pass
 
+
 class NotImplementedForSymbol(MXNetError):
+    """Error: Not implemented for symbol"""
     def __init__(self, function, alias, *args):
         super(NotImplementedForSymbol, self).__init__()
         self.function = function.__name__
         self.alias = alias
         self.args = [str(type(a)) for a in args]
+
     def __str__(self):
         msg = 'Function {}'.format(self.function)
         if self.alias:
@@ -73,12 +107,15 @@ class NotImplementedForSymbol(MXNetError):
         msg += ' is not implemented for Symbol and only available in NDArray.'
         return msg
 
+
 class NotSupportedForSparseNDArray(MXNetError):
+    """Error: Not supported for SparseNDArray"""
     def __init__(self, function, alias, *args):
         super(NotSupportedForSparseNDArray, self).__init__()
         self.function = function.__name__
         self.alias = alias
         self.args = [str(type(a)) for a in args]
+
     def __str__(self):
         msg = 'Function {}'.format(self.function)
         if self.alias:
@@ -87,6 +124,7 @@ class NotSupportedForSparseNDArray(MXNetError):
             msg += ' with arguments ({})'.format(', '.join(self.args))
         msg += ' is not supported for SparseNDArray and only available in NDArray.'
         return msg
+
 
 class MXCallbackList(ctypes.Structure):
     """Structure that holds Callback information. Passed to CustomOpProp."""
@@ -97,6 +135,70 @@ class MXCallbackList(ctypes.Structure):
         ]
 
 
+# Please see: https://stackoverflow.com/questions/5189699/how-to-make-a-class-property
+class _MXClassPropertyDescriptor(object):
+    def __init__(self, fget, fset=None):
+        self.fget = fget
+        self.fset = fset
+
+    def __get__(self, obj, clas=None):
+        if clas is None:
+            clas = type(obj)
+        return self.fget.__get__(obj, clas)()
+
+    def __set__(self, obj, value):
+        if not self.fset:
+            raise MXNetError("cannot use the setter: %s to set attribute" % obj.__name__)
+        if inspect.isclass(obj):
+            type_ = obj
+            obj = None
+        else:
+            type_ = type(obj)
+        return self.fset.__get__(obj, type_)(value)
+
+    def setter(self, func):
+        if not isinstance(func, (classmethod, staticmethod)):
+            func = classmethod(func)
+        self.fset = func
+        return self
+
+
+class _MXClassPropertyMetaClass(type):
+    def __setattr__(cls, key, value):
+        if key in cls.__dict__:
+            obj = cls.__dict__.get(key)
+        if obj and isinstance(obj, _MXClassPropertyDescriptor):
+            return obj.__set__(cls, value)
+
+        return super(_MXClassPropertyMetaClass, cls).__setattr__(key, value)
+
+
+# with_metaclass function obtained from: https://github.com/benjaminp/six/blob/master/six.py
+# pylint: disable=unused-argument
+def with_metaclass(meta, *bases):
+    """Create a base class with a metaclass."""
+    # This requires a bit of explanation: the basic idea is to make a dummy
+    # metaclass for one level of class instantiation that replaces itself with
+    # the actual metaclass.
+    class metaclass(type):
+
+        def __new__(cls, name, this_bases, d):
+            return meta(name, bases, d)
+
+        @classmethod
+        def __prepare__(cls, name, this_bases):
+            return meta.__prepare__(name, bases)
+    return type.__new__(metaclass, 'temporary_class', (), {})
+# pylint: enable=unused-argument
+
+
+def classproperty(func):
+    if not isinstance(func, (classmethod, staticmethod)):
+        func = classmethod(func)
+
+    return _MXClassPropertyDescriptor(func)
+
+
 def _load_lib():
     """Load library by searching possible path."""
     lib_path = libinfo.find_lib_path()
@@ -104,6 +206,7 @@ def _load_lib():
     # DMatrix functions
     lib.MXGetLastError.restype = ctypes.c_char_p
     return lib
+
 
 # version number
 __version__ = libinfo.__version__
@@ -128,6 +231,9 @@ RecordIOHandle = ctypes.c_void_p
 RtcHandle = ctypes.c_void_p
 CudaModuleHandle = ctypes.c_void_p
 CudaKernelHandle = ctypes.c_void_p
+ProfileHandle = ctypes.c_void_p
+
+
 #----------------------------
 # helper function definition
 #----------------------------
@@ -144,6 +250,7 @@ def check_call(ret):
     """
     if ret != 0:
         raise MXNetError(py_str(_LIB.MXGetLastError()))
+
 
 if sys.version_info[0] < 3:
     def c_str(string):
@@ -166,6 +273,24 @@ if sys.version_info[0] < 3:
         Hello, World
         """
         return ctypes.c_char_p(string)
+
+    def c_str_array(strings):
+        """Create ctypes const char ** from a list of Python strings.
+
+        Parameters
+        ----------
+        strings : list of string
+            Python strings.
+
+        Returns
+        -------
+        (ctypes.c_char_p * len(strings))
+            A const char ** pointer that can be passed to C API.
+        """
+        arr = (ctypes.c_char_p * len(strings))()
+        arr[:] = strings
+        return arr
+
 else:
     def c_str(string):
         """Create ctypes char * from a Python string.
@@ -183,10 +308,27 @@ else:
         Examples
         --------
         >>> x = mx.base.c_str("Hello, World")
-        >>> print x.value
-        Hello, World
+        >>> print(x.value)
+        b"Hello, World"
         """
         return ctypes.c_char_p(string.encode('utf-8'))
+
+    def c_str_array(strings):
+        """Create ctypes const char ** from a list of Python strings.
+
+        Parameters
+        ----------
+        strings : list of string
+            Python strings.
+
+        Returns
+        -------
+        (ctypes.c_char_p * len(strings))
+            A const char ** pointer that can be passed to C API.
+        """
+        arr = (ctypes.c_char_p * len(strings))()
+        arr[:] = [s.encode('utf-8') for s in strings]
+        return arr
 
 
 def c_array(ctype, values):
@@ -213,7 +355,57 @@ def c_array(ctype, values):
     >>> x[1]
     2.0
     """
-    return (ctype * len(values))(*values)
+    out = (ctype * len(values))()
+    out[:] = values
+    return out
+
+
+def c_array_buf(ctype, buf):
+    """Create ctypes array from a Python buffer.
+    For primitive types, using the buffer created with array.array is faster
+    than a c_array call.
+
+    Parameters
+    ----------
+    ctype : ctypes data type
+        Data type of the array we want to convert to, such as mx_float.
+
+    buf : buffer type
+        Data content.
+
+    Returns
+    -------
+    out : ctypes array
+        Created ctypes array.
+
+    Examples
+    --------
+    >>> x = mx.base.c_array_buf(mx.base.mx_float, array.array('i', [1, 2, 3]))
+    >>> print len(x)
+    3
+    >>> x[1]
+    2.0
+    """
+    return (ctype * len(buf)).from_buffer(buf)
+
+
+def c_handle_array(objs):
+    """Create ctypes const void ** from a list of MXNet objects with handles.
+
+    Parameters
+    ----------
+    objs : list of NDArray/Symbol.
+        MXNet objects.
+
+    Returns
+    -------
+    (ctypes.c_void_p * len(objs))
+        A void ** pointer that can be passed to C API.
+    """
+    arr = (ctypes.c_void_p * len(objs))()
+    arr[:] = [o.handle for o in objs]
+    return arr
+
 
 def ctypes2buffer(cptr, length):
     """Convert ctypes pointer to buffer type.
@@ -237,6 +429,7 @@ def ctypes2buffer(cptr, length):
     if not ctypes.memmove(rptr, cptr, length):
         raise RuntimeError('memmove failed')
     return res
+
 
 def ctypes2numpy_shared(cptr, shape):
     """Convert a ctypes pointer to a numpy array.
@@ -308,6 +501,7 @@ def _notify_shutdown():
     """Notify MXNet about a shutdown."""
     check_call(_LIB.MXNotifyShutdown())
 
+
 atexit.register(_notify_shutdown)
 
 
@@ -366,7 +560,7 @@ def _as_list(obj):
         return [obj]
 
 
-_OP_NAME_PREFIX_LIST = ['_contrib_', '_linalg_', '_sparse_']
+_OP_NAME_PREFIX_LIST = ['_contrib_', '_linalg_', '_sparse_', '_image_']
 
 
 def _get_op_name_prefix(op_name):
@@ -380,7 +574,7 @@ def _get_op_name_prefix(op_name):
     return ""
 
 
-# pylint: enable=too-many-locals, invalid-name
+# pylint: enable=invalid-name
 def _init_op_module(root_namespace, module_name, make_op_func):
     """
     Registers op functions created by `make_op_func` under
@@ -420,10 +614,11 @@ def _init_op_module(root_namespace, module_name, make_op_func):
         hdl = OpHandle()
         check_call(_LIB.NNGetOpHandle(c_str(name), ctypes.byref(hdl)))
         op_name_prefix = _get_op_name_prefix(name)
+        module_name_local = module_name
         if len(op_name_prefix) > 0:
             func_name = name[len(op_name_prefix):]
             cur_module = submodule_dict[op_name_prefix]
-            module_name = "%s.%s.%s" % (root_namespace, module_name, op_name_prefix[1:-1])
+            module_name_local = "%s.%s.%s" % (root_namespace, module_name, op_name_prefix[1:-1])
         elif name.startswith('_'):
             func_name = name
             cur_module = module_internal
@@ -432,7 +627,7 @@ def _init_op_module(root_namespace, module_name, make_op_func):
             cur_module = module_op
 
         function = make_op_func(hdl, name, func_name)
-        function.__module__ = module_name
+        function.__module__ = module_name_local
         setattr(cur_module, function.__name__, function)
         cur_module.__all__.append(function.__name__)
 
@@ -466,17 +661,18 @@ def _generate_op_module_signature(root_namespace, module_name, op_code_gen_func)
         """Return the generated module file based on module name."""
         path = os.path.dirname(__file__)
         module_path = module_name.split('.')
-        module_path[-1] = 'gen_'+module_path[-1]
+        module_path[-1] = 'gen_' + module_path[-1]
         file_name = os.path.join(path, '..', *module_path) + '.py'
         module_file = open(file_name, 'w')
         dependencies = {'symbol': ['from ._internal import SymbolBase',
                                    'from ..base import _Null'],
                         'ndarray': ['from ._internal import NDArrayBase',
                                     'from ..base import _Null']}
-        module_file.write('# File content is auto-generated. Do not modify.'+os.linesep)
-        module_file.write('# pylint: skip-file'+os.linesep)
+        module_file.write('# File content is auto-generated. Do not modify.' + os.linesep)
+        module_file.write('# pylint: skip-file' + os.linesep)
         module_file.write(os.linesep.join(dependencies[module_name.split('.')[1]]))
         return module_file
+
     def write_all_str(module_file, module_all_list):
         """Write the proper __all__ based on available operators."""
         module_file.write(os.linesep)

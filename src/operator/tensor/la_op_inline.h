@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2017 by Contributors
  * \file la_op_inline.h
  * \brief Operators for advanced linear algebra.
  */
@@ -59,24 +60,24 @@ struct Scale {
 
 // D = gemm(A,B,C)
 struct gemm {
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DType>& B,
-                 const Tensor<xpu, 3, DType>& C, DType alpha, DType beta,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& A, const Tensor<xpu, dim, DType>& B,
+                 const Tensor<xpu, dim, DType>& C, DType alpha, DType beta,
                  bool tA, bool tB, Stream<xpu> *s) {
     linalg_batch_gemm(A, B, C, alpha, beta, tA, tB, s);
   }
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DType>& B,
-                 const Tensor<xpu, 3, DType>& C, const Tensor<xpu, 3, DType>& D,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& A, const Tensor<xpu, dim, DType>& B,
+                 const Tensor<xpu, dim, DType>& C, const Tensor<xpu, dim, DType>& D,
                  Stream<xpu> *s, const nnvm::NodeAttrs& attrs) {
     if ( C.dptr_ != D.dptr_ ) Copy(D, C, s);
     const LaMatrixMacParam& param = nnvm::get<LaMatrixMacParam>(attrs.parsed);
     op(A, B, D, DType(param.alpha), DType(param.beta), param.transpose_a,
        param.transpose_b, s);
   }
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DType>& B,
-                 const Tensor<xpu, 3, DType>& C, const Tensor<xpu, 3, DType>& D,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& A, const Tensor<xpu, dim, DType>& B,
+                 const Tensor<xpu, dim, DType>& C, const Tensor<xpu, dim, DType>& D,
                  const OpContext& ctx, const nnvm::NodeAttrs& attrs) {
     Stream<xpu> *s = ctx.get_stream<xpu>();
     op(A, B, C, D, s, attrs);
@@ -85,17 +86,17 @@ struct gemm {
 
 // C = gemm2(A,B)
 struct gemm2 {
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DType>& B,
-                 const Tensor<xpu, 3, DType>& C, Stream<xpu> *s,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& A, const Tensor<xpu, dim, DType>& B,
+                 const Tensor<xpu, dim, DType>& C, Stream<xpu> *s,
                  const nnvm::NodeAttrs& attrs) {
     const LaMatrixMultParam& param = nnvm::get<LaMatrixMultParam>(attrs.parsed);
     gemm::op(A, B, C, DType(param.alpha), DType(0), param.transpose_a,
              param.transpose_b, s);
   }
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DType>& B,
-                 const Tensor<xpu, 3, DType>& C, const OpContext& ctx,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& A, const Tensor<xpu, dim, DType>& B,
+                 const Tensor<xpu, dim, DType>& C, const OpContext& ctx,
                  const nnvm::NodeAttrs& attrs) {
     Stream<xpu> *s = ctx.get_stream<xpu>();
     op(A, B, C, s, attrs);
@@ -324,16 +325,13 @@ struct syevd {
     linalg_check_batch_size(A.size(0), U.size(0), L.size(0));
     if (A.dptr_ != U.dptr_) Copy(U, A, s);
     // From here on, we work on U only
-    // Reserve workspaces (size determined by query)
-    int lwork(0), liwork(0);
-    linalg_syevd_workspace_query(U[0], &lwork, &liwork, s);
+    // Reserve workspace (size determined by query)
+    int lwork(linalg_syevd_workspace_query(U[0], L[0], s));
     Tensor<xpu, 1, DType> work = ctx.requested[0]
       .get_space_typed<xpu, 1, DType>(Shape1(lwork), s);
-    Tensor<xpu, 1, int> iwork = ctx.requested[0]
-      .get_space_typed<xpu, 1, int>(Shape1(liwork), s);
     // Loop over items in batch
     for (index_t i = 0; i < U.size(0); ++i) {
-      linalg_syevd(U[i], L[i], work, iwork, s);
+      linalg_syevd(U[i], L[i], work, s);
     }
     // Set signs of eigenvectors in a deterministic way
     using namespace mxnet_op;
@@ -345,11 +343,11 @@ struct syevd {
 // Backward operators (always using batch processing)
 
 struct gemm_backward {
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& dD, const Tensor<xpu, 3, DType>& A,
-                 const Tensor<xpu, 3, DType>& B, const Tensor<xpu, 3, DType>& C,
-                 const Tensor<xpu, 3, DType>& dA, const Tensor<xpu, 3, DType>& dB,
-                 const Tensor<xpu, 3, DType>& dC,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& dD, const Tensor<xpu, dim, DType>& A,
+                 const Tensor<xpu, dim, DType>& B, const Tensor<xpu, dim, DType>& C,
+                 const Tensor<xpu, dim, DType>& dA, const Tensor<xpu, dim, DType>& dB,
+                 const Tensor<xpu, dim, DType>& dC,
                  Stream<xpu>* s, const nnvm::NodeAttrs& attrs) {
     const LaMatrixMacParam& param = nnvm::get<LaMatrixMacParam>(attrs.parsed);
     bool tA(param.transpose_a), tB(param.transpose_b);
@@ -361,11 +359,11 @@ struct gemm_backward {
     using namespace mxnet_op;
     Kernel<Scale, xpu>::Launch(s, dC.MSize(), DType(param.beta), dC.dptr_);
   }
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& dD, const Tensor<xpu, 3, DType>& A,
-                 const Tensor<xpu, 3, DType>& B, const Tensor<xpu, 3, DType>& C,
-                 const Tensor<xpu, 3, DType>& dA, const Tensor<xpu, 3, DType>& dB,
-                 const Tensor<xpu, 3, DType>& dC,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& dD, const Tensor<xpu, dim, DType>& A,
+                 const Tensor<xpu, dim, DType>& B, const Tensor<xpu, dim, DType>& C,
+                 const Tensor<xpu, dim, DType>& dA, const Tensor<xpu, dim, DType>& dB,
+                 const Tensor<xpu, dim, DType>& dC,
                  const OpContext& ctx, const nnvm::NodeAttrs& attrs) {
     Stream<xpu> *s = ctx.get_stream<xpu>();
     op(dD, A, B, C, dA, dB, dC, s, attrs);
@@ -373,10 +371,10 @@ struct gemm_backward {
 };
 
 struct gemm2_backward {
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& dC, const Tensor<xpu, 3, DType>& A,
-                 const Tensor<xpu, 3, DType>& B, const Tensor<xpu, 3, DType>& dA,
-                 const Tensor<xpu, 3, DType>& dB,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& dC, const Tensor<xpu, dim, DType>& A,
+                 const Tensor<xpu, dim, DType>& B, const Tensor<xpu, dim, DType>& dA,
+                 const Tensor<xpu, dim, DType>& dB,
                  Stream<xpu>* s, const nnvm::NodeAttrs& attrs) {
     const LaMatrixMultParam& param = nnvm::get<LaMatrixMultParam>(attrs.parsed);
     bool tA(param.transpose_a), tB(param.transpose_b);
@@ -385,10 +383,10 @@ struct gemm2_backward {
     (tB ? gemm::op(dC, A, dB, DType(param.alpha), DType(0), true, tA, s)
         : gemm::op(A, dC, dB, DType(param.alpha), DType(0), !tA, false, s));
   }
-  template<typename xpu, typename DType>
-  static void op(const Tensor<xpu, 3, DType>& dC, const Tensor<xpu, 3, DType>& A,
-                 const Tensor<xpu, 3, DType>& B, const Tensor<xpu, 3, DType>& dA,
-                 const Tensor<xpu, 3, DType>& dB,
+  template<typename xpu, int dim, typename DType>
+  static void op(const Tensor<xpu, dim, DType>& dC, const Tensor<xpu, dim, DType>& A,
+                 const Tensor<xpu, dim, DType>& B, const Tensor<xpu, dim, DType>& dA,
+                 const Tensor<xpu, dim, DType>& dB,
                  const OpContext& ctx, const nnvm::NodeAttrs& attrs) {
     Stream<xpu> *s = ctx.get_stream<xpu>();
     op(dC, A, B, dA, dB, s, attrs);
@@ -603,13 +601,13 @@ struct gelqf_backward {
 template<typename DType>
 DType syevd_back_helper_eps(DType* X);
 
-template<> inline
-float syevd_back_helper_eps(float* X) {
+template<>
+MSHADOW_XINLINE float syevd_back_helper_eps(float* X) {
   return 1e-30;
 }
 
-template<> inline
-double syevd_back_helper_eps(double* X) {
+template<>
+MSHADOW_XINLINE double syevd_back_helper_eps(double* X) {
   return 1e-100;
 }
 

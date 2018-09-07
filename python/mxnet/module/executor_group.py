@@ -64,12 +64,26 @@ def _load_general(data, targets, major_axis):
 
 def _load_data(batch, targets, major_axis):
     """Load data into sliced arrays."""
-    _load_general(batch.data, targets, major_axis)
+    if isinstance(batch, list):
+        new_batch = []
+        for i in range(len(targets)):
+            new_batch.append([b.data[i] for b in batch])
+        new_targets = [[dst for _, dst in d_target] for d_target in targets]
+        _load_general(new_batch, new_targets, major_axis)
+    else:
+        _load_general(batch.data, targets, major_axis)
 
 
 def _load_label(batch, targets, major_axis):
     """Load label into sliced arrays."""
-    _load_general(batch.label, targets, major_axis)
+    if isinstance(batch, list):
+        new_batch = []
+        for i in range(len(targets)):
+            new_batch.append([b.label[i] for b in batch])
+        new_targets = [[dst for _, dst in d_target] for d_target in targets]
+        _load_general(new_batch, new_targets, major_axis)
+    else:
+        _load_general(batch.label, targets, major_axis)
 
 
 def _merge_multi_context(outputs, major_axis):
@@ -95,6 +109,36 @@ def _merge_multi_context(outputs, major_axis):
             rets.append(tensors[0])
     return rets
 
+def _prepare_group2ctxs(group2ctxs, ctx_len):
+    """Prepare the group2contexts, will duplicate the context
+    if some ctx_group map to only one context.
+    """
+    if group2ctxs is None:
+        return [None] * ctx_len
+    elif isinstance(group2ctxs, list):
+        assert(len(group2ctxs) == ctx_len), "length of group2ctxs\
+            should be %d" % ctx_len
+        return group2ctxs
+    elif isinstance(group2ctxs, dict):
+        ret = [{} for i in range(ctx_len)]
+        for k, v in group2ctxs.items():
+            ctxs = None
+            if isinstance(v, ctx.Context):
+                ctxs = [v] * ctx_len
+            else:
+                if len(v) == 1:
+                    ctxs = v * ctx_len
+                else:
+                    assert(len(v) == ctx_len), "length of group2ctxs[%s]\
+                        should be %d or 1" % (k, ctx_len)
+                    ctxs = v
+            for i in range(ctx_len):
+                ret[i][k] = ctxs[i]
+        return ret
+    else:
+        assert(False), "group2ctxs should be list of dict of str to context,\
+            or dict of str to context or list of context"
+        return False
 
 class DataParallelExecutorGroup(object):
     """A group of executors that lives on a group of devices.
@@ -139,10 +183,13 @@ class DataParallelExecutorGroup(object):
         Requirement for gradient accumulation. Can be 'write', 'add', or 'null'
         (default to 'write').
         Can be specified globally (str) or for each argument (list, dict).
+    group2ctxs : dict of str to context or list of context,
+                 or list of dict of str to context
+        Default is `None`. Mapping the `ctx_group` attribute to the context assignment.
     """
     def __init__(self, symbol, contexts, workload, data_shapes, label_shapes, param_names,
                  for_training, inputs_need_grad, shared_group=None, logger=logging,
-                 fixed_param_names=None, grad_req='write', state_names=None):
+                 fixed_param_names=None, grad_req='write', state_names=None, group2ctxs=None):
         self.param_names = param_names
         self.arg_names = symbol.list_arguments()
         self.aux_names = symbol.list_auxiliary_states()
@@ -150,6 +197,7 @@ class DataParallelExecutorGroup(object):
         self.symbol = symbol
         self.contexts = contexts
         self.workload = workload
+        self.group2ctxs = _prepare_group2ctxs(group2ctxs, len(contexts))
 
         self.for_training = for_training
         self.inputs_need_grad = inputs_need_grad
@@ -403,8 +451,12 @@ class DataParallelExecutorGroup(object):
         if is_train is None:
             is_train = self.for_training
 
-        if self.label_arrays is not None and data_batch.label:
-            _load_label(data_batch, self.label_arrays, self.label_layouts)
+        if isinstance(data_batch, list):
+            if self.label_arrays is not None and data_batch is not None and data_batch[0].label:
+                _load_label(data_batch, self.label_arrays, self.label_layouts)
+        else:
+            if self.label_arrays is not None and data_batch.label:
+                _load_label(data_batch, self.label_arrays, self.label_layouts)
 
         for exec_ in self.execs:
             exec_.forward(is_train=is_train)
@@ -540,13 +592,13 @@ class DataParallelExecutorGroup(object):
                     # pylint: disable=no-member
                     og_my_slice = nd.slice_axis(grad, axis=axis, begin=islice.start,
                                                 end=islice.stop)
-                    # pylint: enable=no-member
                     out_grads_slice.append(og_my_slice.as_in_context(self.contexts[i]))
+                    # pylint: enable=no-member
                 else:
                     out_grads_slice.append(grad.copyto(self.contexts[i]))
             exec_.backward(out_grads=out_grads_slice)
 
-    def update_metric(self, eval_metric, labels):
+    def update_metric(self, eval_metric, labels, pre_sliced):
         """Accumulate the performance according to `eval_metric` on all devices
         by comparing outputs from [begin, end) to labels. By default use all
         outputs.
@@ -557,25 +609,30 @@ class DataParallelExecutorGroup(object):
             The metric used for evaluation.
         labels : list of NDArray
             Typically comes from `label` of a `DataBatch`.
+        pre_sliced : bool
+            Whether labels are already sliced.
         begin : int
             Starting index of used outputs.
         end : int or None
             Ending index of used outputs.
         """
-        for texec, islice in zip(self.execs, self.slices):
-            labels_slice = []
-            for label, axis in zip(labels, self.label_layouts):
-                if axis == 0:
-                    # slicing NDArray along axis 0 can avoid copying
-                    labels_slice.append(label[islice])
-                elif axis > 0:
-                    # pylint: disable=no-member
-                    label_my_slice = nd.slice_axis(label, axis=axis, begin=islice.start,
-                                                   end=islice.stop).as_in_context(label.context)
-                    # pylint: enable=no-member
-                    labels_slice.append(label_my_slice)
-                else:
-                    labels_slice.append(label)
+        for current_exec, (texec, islice) in enumerate(zip(self.execs, self.slices)):
+            if not pre_sliced:
+                labels_slice = []
+                for label, axis in zip(labels, self.label_layouts):
+                    if axis == 0:
+                        # slicing NDArray along axis 0 can avoid copying
+                        labels_slice.append(label[islice])
+                    elif axis > 0:
+                        # pylint: disable=no-member
+                        label_my_slice = nd.slice_axis(label, axis=axis, begin=islice.start,
+                                                       end=islice.stop).as_in_context(label.context)
+                        # pylint: enable=no-member
+                        labels_slice.append(label_my_slice)
+                    else:
+                        labels_slice.append(label)
+            else:
+                labels_slice = labels[current_exec]
 
             labels_ = OrderedDict(zip(self.label_names, labels_slice))
             preds = OrderedDict(zip(self.output_names, texec.outputs))
@@ -597,9 +654,11 @@ class DataParallelExecutorGroup(object):
         if label_shapes is not None:
             input_types.update({x.name: x.dtype for x in label_shapes})
 
+        group2ctx = self.group2ctxs[i]
+
         executor = self.symbol.simple_bind(ctx=context, grad_req=self.grad_req,
                                            type_dict=input_types, shared_arg_names=self.param_names,
-                                           shared_exec=shared_exec,
+                                           shared_exec=shared_exec, group2ctx=group2ctx,
                                            shared_buffer=shared_data_arrays, **input_shapes)
         self._total_exec_bytes += int(executor.debug_str().split('\n')[-3].split()[1])
         return executor

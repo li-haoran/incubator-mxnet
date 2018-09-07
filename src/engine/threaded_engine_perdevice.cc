@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2015 by Contributors
  * \file threaded_engine_perdevice.cc
  * \brief ThreadedEngine that uses fix amount of thread for each device.
  */
@@ -26,6 +27,7 @@
 #include <dmlc/logging.h>
 #include <dmlc/parameter.h>
 #include <dmlc/concurrency.h>
+#include <dmlc/thread_group.h>
 #include "./threaded_engine.h"
 #include "./thread_pool.h"
 #include "../common/lazy_alloc_array.h"
@@ -50,23 +52,41 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
   static auto constexpr kWorkerQueue = kFIFO;
 
   ThreadedEnginePerDevice() noexcept(false) {
-    gpu_worker_nthreads_ = common::GetNumThreadPerGPU();
+    this->Start();
+  }
+  ~ThreadedEnginePerDevice() noexcept(false) {
+    this->StopNoWait();
+  }
+
+  void StopNoWait() {
+    SignalQueuesForKill();
+    gpu_normal_workers_.Clear();
+    gpu_priority_workers_.Clear();
+    gpu_copy_workers_.Clear();
+    cpu_normal_workers_.Clear();
+    cpu_priority_worker_.reset(nullptr);
+  }
+
+  void Stop() override {
+    if (is_worker_) return;
+    WaitForAll();
+    StopNoWait();
+  }
+
+  void Start() override {
+    if (is_worker_) return;
+    gpu_worker_nthreads_ = common::GetNumThreadsPerGPU();
     cpu_worker_nthreads_ = dmlc::GetEnv("MXNET_CPU_WORKER_NTHREADS", 1);
+    gpu_copy_nthreads_ = dmlc::GetEnv("MXNET_GPU_COPY_NTHREADS", 2);
     // create CPU task
     int cpu_priority_nthreads = dmlc::GetEnv("MXNET_CPU_PRIORITY_NTHREADS", 4);
     cpu_priority_worker_.reset(new ThreadWorkerBlock<kPriorityQueue>());
     cpu_priority_worker_->pool.reset(new ThreadPool(
-        cpu_priority_nthreads, [this]() {
-          this->CPUWorker(Context(), cpu_priority_worker_.get());
-        }));
+        cpu_priority_nthreads,
+        [this](std::shared_ptr<dmlc::ManualEvent> ready_event) {
+          this->CPUWorker(Context(), cpu_priority_worker_.get(), ready_event);
+        }, true));
     // GPU tasks will be created lazily
-  }
-  ~ThreadedEnginePerDevice() noexcept(false) {
-    SignalQueuesForKill();
-    gpu_normal_workers_.Clear();
-    gpu_copy_workers_.Clear();
-    cpu_normal_workers_.Clear();
-    cpu_priority_worker_.reset(nullptr);
   }
 
  protected:
@@ -74,14 +94,15 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
     const Context& ctx = opr_block->ctx;
     if ((opr_block->opr->prop == FnProperty::kAsync ||
          opr_block->opr->prop == FnProperty::kDeleteVar) && pusher_thread) {
-      if (ctx.dev_mask() == gpu::kDevMask) {
+      if (ctx.dev_mask() == Context::kGPU) {
         #if MXNET_USE_CUDA
         MSHADOW_CATCH_ERROR(mshadow::SetDevice<gpu>(ctx.dev_id));
         #endif
       }
       this->ExecuteOprBlock(RunContext{ctx, nullptr}, opr_block);
     } else {
-      if (ctx.dev_mask() == cpu::kDevMask) {
+      if (ctx.dev_mask() == Context::kCPU) {
+        // CPU execution.
         if (opr_block->opr->prop == FnProperty::kCPUPrioritized) {
           cpu_priority_worker_->task_queue.Push(opr_block, opr_block->priority);
         } else {
@@ -90,11 +111,12 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
           auto ptr =
           cpu_normal_workers_.Get(dev_id, [this, ctx, nthread]() {
               auto blk = new ThreadWorkerBlock<kWorkerQueue>();
-              blk->pool.reset(new ThreadPool(nthread, [this, ctx, blk] () {
-                    this->CPUWorker(ctx, blk);
-                  }));
-              return blk;
-            });
+              blk->pool.reset(new ThreadPool(nthread,
+                  [this, ctx, blk](std::shared_ptr<dmlc::ManualEvent> ready_event) {
+                    this->CPUWorker(ctx, blk, ready_event);
+                  }, true));
+            return blk;
+          });
           if (ptr) {
             if (opr_block->opr->prop == FnProperty::kDeleteVar) {
               ptr->task_queue.PushFront(opr_block, opr_block->priority);
@@ -104,22 +126,21 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
           }
         }
       } else {
-        CHECK_EQ(ctx.dev_mask(), gpu::kDevMask);
+        CHECK_EQ(ctx.dev_mask(), Context::kGPU);
         // GPU execution.
-        FnProperty prop = opr_block->opr->prop;
-        bool is_copy = (prop == FnProperty::kCopyFromGPU ||
-                        prop == FnProperty::kCopyToGPU);
-        int nthread = gpu_worker_nthreads_;
+        const FnProperty prop = opr_block->opr->prop;
+        const bool is_copy = (prop == FnProperty::kCopyFromGPU ||
+                              prop == FnProperty::kCopyToGPU);
         if (is_copy) {
-          auto ptr =
-          gpu_copy_workers_.Get(ctx.dev_id, [this, ctx, is_copy, nthread]() {
-            // Signify to kernel that GPU is being used,  no Kernel Launch OMP (temporary behavior)
-            Engine::Get()->set_num_omp_threads_per_worker(1);
+          const size_t nthread = gpu_copy_nthreads_;
+          auto ptr = gpu_copy_workers_.Get(ctx.dev_id, [this, ctx, is_copy, nthread]() {
+            // Signify to kernel that GPU is being used, so reserve cores as necessary
+            OpenMP::Get()->set_reserve_cores(GetReserveCoreCount(true));
             auto blk = new ThreadWorkerBlock<kCopyQueue>();
               blk->pool.reset(new ThreadPool(
                 nthread,
                 [this, ctx, is_copy, blk]
-                  (std::shared_ptr<ThreadPool::SimpleEvent> ready_event) {
+                  (std::shared_ptr<dmlc::ManualEvent> ready_event) {
                     this->GPUWorker(ctx, is_copy, blk, ready_event);
                   }, true));
               return blk;
@@ -132,23 +153,44 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
             }
           }
         } else {
-          auto ptr = gpu_normal_workers_.Get(ctx.dev_id, [this, ctx, is_copy, nthread]() {
-            // Signify to kernel that GPU is being used,  no Kernel Launch OMP (temporary behavior)
-            Engine::Get()->set_num_omp_threads_per_worker(1);
-              auto blk = new ThreadWorkerBlock<kWorkerQueue>();
-              blk->pool.reset(new ThreadPool(
-                nthread,
-                [this, ctx, is_copy, blk]
-                  (std::shared_ptr<ThreadPool::SimpleEvent> ready_event) {
-                    this->GPUWorker(ctx, is_copy, blk, ready_event);
-                  }, true));
-              return blk;
+          const size_t nthread = gpu_worker_nthreads_;
+          // GPU priority task
+          if (opr_block->opr->prop == FnProperty::kGPUPrioritized) {
+            auto ptr = gpu_priority_workers_.Get(ctx.dev_id, [this, ctx, is_copy, nthread]() {
+              // Signify to kernel that GPU is being used, so reserve cores as necessary
+              OpenMP::Get()->set_reserve_cores(GetReserveCoreCount(true));
+                auto blk = new ThreadWorkerBlock<kPriorityQueue>();
+                blk->pool.reset(new ThreadPool(
+                  nthread,
+                  [this, ctx, is_copy, blk]
+                    (std::shared_ptr<dmlc::ManualEvent> ready_event) {
+                      this->GPUWorker(ctx, is_copy, blk, ready_event);
+                    }, true));
+                return blk;
             });
-          if (ptr) {
-            if (opr_block->opr->prop == FnProperty::kDeleteVar) {
-              ptr->task_queue.PushFront(opr_block, opr_block->priority);
-            } else {
+            if (ptr) {
               ptr->task_queue.Push(opr_block, opr_block->priority);
+            }
+          } else {
+            // GPU normal task
+            auto ptr = gpu_normal_workers_.Get(ctx.dev_id, [this, ctx, is_copy, nthread]() {
+              // Signify to kernel that GPU is being used, so reserve cores as necessary
+              OpenMP::Get()->set_reserve_cores(GetReserveCoreCount(true));
+                auto blk = new ThreadWorkerBlock<kWorkerQueue>();
+                blk->pool.reset(new ThreadPool(
+                  nthread,
+                  [this, ctx, is_copy, blk]
+                    (std::shared_ptr<dmlc::ManualEvent> ready_event) {
+                      this->GPUWorker(ctx, is_copy, blk, ready_event);
+                    }, true));
+                return blk;
+            });
+            if (ptr) {
+              if (opr_block->opr->prop == FnProperty::kDeleteVar) {
+                ptr->task_queue.PushFront(opr_block, opr_block->priority);
+              } else {
+                ptr->task_queue.Push(opr_block, opr_block->priority);
+              }
             }
           }
         }
@@ -170,10 +212,14 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
     ~ThreadWorkerBlock() noexcept(false) {}
   };
 
+  /*! \brief whether this is a worker thread. */
+  static MX_THREAD_LOCAL bool is_worker_;
   /*! \brief number of concurrent thread cpu worker uses */
-  int cpu_worker_nthreads_;
+  size_t cpu_worker_nthreads_;
   /*! \brief number of concurrent thread each gpu worker uses */
-  int gpu_worker_nthreads_;
+  size_t gpu_worker_nthreads_;
+  /*! \brief number of concurrent thread each gpu copy worker uses */
+  size_t gpu_copy_nthreads_;
   // cpu worker
   common::LazyAllocArray<ThreadWorkerBlock<kWorkerQueue> > cpu_normal_workers_;
   // cpu priority worker
@@ -182,6 +228,8 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
   common::LazyAllocArray<ThreadWorkerBlock<kWorkerQueue> > gpu_normal_workers_;
   // workers doing copy works from/to GPU
   common::LazyAllocArray<ThreadWorkerBlock<kCopyQueue> > gpu_copy_workers_;
+  // gpu priority workers
+  common::LazyAllocArray<ThreadWorkerBlock<kPriorityQueue> > gpu_priority_workers_;
   /*!
    * \brief GPU worker that performs operations on a certain device.
    * \param dev_id The device id of the worker.
@@ -192,11 +240,13 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
   inline void GPUWorker(Context ctx,
                         bool is_copy_worker,
                         ThreadWorkerBlock<type> *block,
-                        std::shared_ptr<ThreadPool::SimpleEvent> ready_event) {
+                        const std::shared_ptr<dmlc::ManualEvent>& ready_event) {
+    this->is_worker_ = true;
 #if MXNET_USE_CUDA
+    CHECK(block != nullptr);
     mshadow::Stream<gpu> *stream;
     do {
-      ThreadPool::SimpleEvent::SetReadyOnDestroy setReady(ready_event);
+      ThreadPool::SetReadyOnDestroy setReady(ready_event);
       // allocate stream
       mshadow::SetDevice<gpu>(ctx.dev_id);
       if (is_copy_worker) {
@@ -209,6 +259,11 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
     OprBlock* opr_block;
     RunContext run_ctx{ctx, stream};
     auto* task_queue = &(block->task_queue);
+
+    // Don't eat up omp threads for GPU jobs.  They're probably best used elsewhere,
+    // for example for image decoding or the optimizer pass
+    OpenMP::Get()->on_start_worker_thread(false);
+
     while (task_queue->Pop(&opr_block)) {
       this->ExecuteOprBlock(run_ctx, opr_block);
     }
@@ -224,14 +279,43 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
    */
   template<dmlc::ConcurrentQueueType type>
   inline void CPUWorker(Context ctx,
-                        ThreadWorkerBlock<type> *block) {
+                        ThreadWorkerBlock<type> *block,
+                        const std::shared_ptr<dmlc::ManualEvent>& ready_event) {
+    this->is_worker_ = true;
     auto* task_queue = &(block->task_queue);
     RunContext run_ctx{ctx, nullptr};
+
     // execute task
     OprBlock* opr_block;
+    ready_event->signal();
+
+    // Set default number of threads for OMP parallel regions initiated by this thread
+    OpenMP::Get()->on_start_worker_thread(true);
+
     while (task_queue->Pop(&opr_block)) {
       this->ExecuteOprBlock(run_ctx, opr_block);
     }
+  }
+
+  /*!
+   * \brief Get number of cores this engine should reserve for its own use
+   * \param using_gpu Whether there is GPU usage
+   * \return number of cores that this engine wishes to be reserved
+   * \note Testing found no degradation of performance using these values
+   *       running cifar10 with resnet50 on various GPU systems,
+   *       including AWS p2.16xlarge, which has 16 GPU's
+   */
+  int GetReserveCoreCount(const bool using_gpu) const {
+    int reserve = 0;
+    if (using_gpu) {
+      // Save at least one for GPU tasks
+      ++reserve;
+      // If we have 8 or more real cores, reserve another core for GPU tasks
+      if (OpenMP::Get()->GetRecommendedOMPThreadCount(true) >= 8) {
+        ++reserve;
+      }
+    }
+    return reserve;
   }
 
   /*! \brief Signal a single queue for shutdown */
@@ -244,6 +328,7 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
 
   /*! Signal all queues for shutdown */
   void SignalQueuesForKill() {
+    SignalQueueForKill(&gpu_priority_workers_);
     SignalQueueForKill(&gpu_normal_workers_);
     SignalQueueForKill(&gpu_copy_workers_);
     SignalQueueForKill(&cpu_normal_workers_);
@@ -256,5 +341,8 @@ class ThreadedEnginePerDevice : public ThreadedEngine {
 Engine *CreateThreadedEnginePerDevice() {
   return new ThreadedEnginePerDevice();
 }
+
+MX_THREAD_LOCAL bool ThreadedEnginePerDevice::is_worker_ = false;
+
 }  // namespace engine
 }  // namespace mxnet

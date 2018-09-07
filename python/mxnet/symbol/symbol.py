@@ -25,6 +25,7 @@ try:
 except ImportError:
     from builtins import slice as py_slice
 
+from array import array
 import ctypes
 import warnings
 from numbers import Number
@@ -32,11 +33,11 @@ from numbers import Number
 import numpy as _numpy
 
 from ..attribute import AttrScope
-from ..base import _LIB, numeric_types
-from ..base import c_array, c_str, mx_uint, py_str, string_types
+from ..base import _LIB, numeric_types, c_array, c_array_buf, c_str, c_str_array, c_handle_array
+from ..base import mx_uint, py_str, string_types, integer_types
 from ..base import NDArrayHandle, ExecutorHandle, SymbolHandle
 from ..base import check_call, MXNetError, NotImplementedForSymbol
-from ..context import Context
+from ..context import Context, current_context
 from ..ndarray import NDArray, _DTYPE_NP_TO_MX, _DTYPE_MX_TO_NP, _GRAD_REQ_MAP
 from ..ndarray.ndarray import _STORAGE_TYPE_STR_TO_ID
 from ..ndarray import _ndarray_cls
@@ -46,7 +47,8 @@ from . import op
 from ._internal import SymbolBase, _set_symbol_class
 
 __all__ = ["Symbol", "var", "Variable", "Group", "load", "load_json",
-           "pow", "maximum", "minimum", "hypot", "zeros", "ones", "full", "arange"]
+           "pow", "maximum", "minimum", "hypot", "eye", "zeros", "ones", "full", "arange",
+           "histogram"]
 
 
 class Symbol(SymbolBase):
@@ -54,6 +56,9 @@ class Symbol(SymbolBase):
     # disable dictionary storage, also do not have parent type.
     # pylint: disable=no-member
     __slots__ = []
+
+    # Make numpy functions return Symbol instead of numpy object array
+    __array_priority__ = 1000.0
 
     def __repr__(self):
         """Gets a string representation of the symbol."""
@@ -98,6 +103,11 @@ class Symbol(SymbolBase):
             return _internal._PlusScalar(self, scalar=other)
         else:
             raise TypeError('type %s not supported' % str(type(other)))
+
+    def __bool__(self):
+        raise NotImplementedForSymbol(self.__bool__, 'bool')
+
+    __nonzero__ = __bool__
 
     def __iadd__(self, other):
         raise NotImplementedForSymbol(self.__iadd__, '+=', other, 1)
@@ -463,11 +473,11 @@ class Symbol(SymbolBase):
 
         num_args = len(args) + len(kwargs)
         if len(kwargs) != 0:
-            keys = c_array(ctypes.c_char_p, [c_str(key) for key in kwargs])
-            args = c_array(SymbolHandle, [s.handle for s in kwargs.values()])
+            keys = c_str_array(kwargs.keys())
+            args = c_handle_array(kwargs.values())
         else:
             keys = None
-            args = c_array(SymbolHandle, [s.handle for s in args])
+            args = c_handle_array(args)
         check_call(_LIB.MXSymbolCompose(
             self.handle, name, num_args, keys, args))
 
@@ -490,14 +500,16 @@ class Symbol(SymbolBase):
             Indexing key
 
         """
-        output_names = self.list_outputs()
+        output_count = len(self)
         if isinstance(index, py_slice):
             start = 0 if index.start is None else index.start
-            stop = len(output_names) if index.stop is None else index.stop
+            stop = output_count if index.stop is None else index.stop
             step = 1 if index.step is None else index.step
             return Group([self[i] for i in range(start, stop, step)])
 
         if isinstance(index, string_types):
+            # Returning this list of names is expensive. Some symbols may have hundreds of outputs
+            output_names = self.list_outputs()
             idx = None
             for i, name in enumerate(output_names):
                 if name == index:
@@ -510,7 +522,7 @@ class Symbol(SymbolBase):
 
         if not isinstance(index, int):
             raise TypeError('Symbol only support integer index to fetch i-th output')
-        if index >= len(output_names):
+        if index >= output_count:
             # Important, python determines the end by this exception
             raise IndexError
         handle = SymbolHandle()
@@ -744,6 +756,26 @@ class Symbol(SymbolBase):
             self.handle, ctypes.byref(size), ctypes.byref(sarr)))
         return [py_str(sarr[i]) for i in range(size.value)]
 
+    # pylint: disable=invalid-length-returned
+    def __len__(self):
+        """Get number of outputs for the symbol.
+
+        Example
+        -------
+        >>> a = mx.sym.var('a')
+        >>> b = mx.sym.var('b')
+        >>> c = a + b
+        >>> len(c)
+
+        Returns
+        -------
+        len(self): Number of outputs
+            Number of outputs
+        """
+        output_count = mx_uint()
+        check_call(_LIB.MXSymbolGetNumOutputs(self.handle, ctypes.byref(output_count)))
+        return output_count.value
+
     def list_auxiliary_states(self):
         """Lists all the auxiliary states in the symbol.
 
@@ -856,7 +888,7 @@ class Symbol(SymbolBase):
                     types either by positional or kwargs way.')
         sdata = []
         if len(args) != 0:
-            keys = None
+            keys = c_array(ctypes.c_char_p, [])
             for s in args:
                 if s is not None:
                     s = _numpy.dtype(s).type
@@ -866,12 +898,13 @@ class Symbol(SymbolBase):
                 else:
                     sdata.append(-1)
         else:
-            keys = []
+            str_keys = []
             for k, v in kwargs.items():
                 v = _numpy.dtype(v).type
                 if v in _DTYPE_NP_TO_MX:
-                    keys.append(c_str(k))
+                    str_keys.append(k)
                     sdata.append(_DTYPE_NP_TO_MX[v])
+            keys = c_str_array(str_keys)
         arg_type_size = mx_uint()
         arg_type_data = ctypes.POINTER(ctypes.c_int)()
         out_type_size = mx_uint()
@@ -882,8 +915,8 @@ class Symbol(SymbolBase):
         check_call(_LIB.MXSymbolInferType(
             self.handle,
             mx_uint(len(sdata)),
-            c_array(ctypes.c_char_p, keys),
-            c_array(ctypes.c_int, sdata),
+            keys,
+            c_array_buf(ctypes.c_int, array('i', sdata)),
             ctypes.byref(arg_type_size),
             ctypes.byref(arg_type_data),
             ctypes.byref(out_type_size),
@@ -1043,7 +1076,7 @@ class Symbol(SymbolBase):
         sdata = []
         indptr = [0]
         if len(args) != 0:
-            keys = None
+            keys = c_array(ctypes.c_char_p, [])
             for i, s in enumerate(args):
                 if s is not None:
                     if not isinstance(s, tuple):
@@ -1052,14 +1085,15 @@ class Symbol(SymbolBase):
                     sdata.extend(s)
                 indptr.append(len(sdata))
         else:
-            keys = []
+            str_keys = []
             for k, v in kwargs.items():
                 if not isinstance(v, tuple):
                     raise TypeError("Arguments need to be shapes (tuple), "
                                     "but '%s' is %s." % (k, type(v)))
-                keys.append(c_str(k))
+                str_keys.append(k)
                 sdata.extend(v)
                 indptr.append(len(sdata))
+            keys = c_str_array(str_keys)
         arg_shape_size = mx_uint()
         arg_shape_ndim = ctypes.POINTER(mx_uint)()
         arg_shape_data = ctypes.POINTER(ctypes.POINTER(mx_uint))()
@@ -1077,9 +1111,9 @@ class Symbol(SymbolBase):
         check_call(infer_func(
             self.handle,
             mx_uint(len(indptr) - 1),
-            c_array(ctypes.c_char_p, keys),
-            c_array(mx_uint, indptr),
-            c_array(mx_uint, sdata),
+            keys,
+            c_array_buf(mx_uint, array('I', indptr)),
+            c_array_buf(mx_uint, array('I', sdata)),
             ctypes.byref(arg_shape_size),
             ctypes.byref(arg_shape_ndim),
             ctypes.byref(arg_shape_data),
@@ -1226,9 +1260,12 @@ class Symbol(SymbolBase):
             if len(args) != len(arg_names):
                 raise ValueError('Length of %s does not match the number of arguments' % arg_key)
             for narr in args:
-                if not isinstance(narr, NDArray):
+                if narr is None and allow_missing:
+                    arg_handles.append(None)
+                elif not isinstance(narr, NDArray):
                     raise TypeError('Only accept list of NDArrays or dict of str to NDArray')
-                arg_handles.append(narr.handle)
+                else:
+                    arg_handles.append(narr.handle)
             arg_arrays = args
         elif isinstance(args, dict):
             for name in arg_names:
@@ -1248,6 +1285,7 @@ class Symbol(SymbolBase):
             raise TypeError('Only accept list of NDArrays or dict of str to NDArray')
         return c_array(NDArrayHandle, arg_handles), arg_arrays
 
+    # pylint: disable=too-many-locals
     def simple_bind(self, ctx, grad_req='write', type_dict=None, stype_dict=None,
                     group2ctx=None, shared_arg_names=None, shared_exec=None,
                     shared_buffer=None, **kwargs):
@@ -1330,11 +1368,11 @@ class Symbol(SymbolBase):
             for k, v in type_dict.items():
                 v = _numpy.dtype(v).type
                 if v in _DTYPE_NP_TO_MX:
-                    provided_arg_type_names.append(c_str(k))
-                    provided_arg_type_data.append(ctypes.c_int(_DTYPE_NP_TO_MX[v]))
+                    provided_arg_type_names.append(k)
+                    provided_arg_type_data.append(_DTYPE_NP_TO_MX[v])
             num_provided_arg_types = mx_uint(len(provided_arg_type_names))
-            provided_arg_type_names = c_array(ctypes.c_char_p, provided_arg_type_names)
-            provided_arg_type_data = c_array(ctypes.c_int, provided_arg_type_data)
+            provided_arg_type_names = c_str_array(provided_arg_type_names)
+            provided_arg_type_data = c_array_buf(ctypes.c_int, array('i', provided_arg_type_data))
 
         # storage types
         num_provided_arg_stypes = 0
@@ -1346,11 +1384,11 @@ class Symbol(SymbolBase):
             provided_arg_stype_data = []
             for k, v in stype_dict.items():
                 if v in _STORAGE_TYPE_STR_TO_ID:
-                    provided_arg_stype_names.append(c_str(k))
-                    provided_arg_stype_data.append(ctypes.c_int(_STORAGE_TYPE_STR_TO_ID[v]))
+                    provided_arg_stype_names.append(k)
+                    provided_arg_stype_data.append(_STORAGE_TYPE_STR_TO_ID[v])
             num_provided_arg_stypes = mx_uint(len(provided_arg_stype_names))
-            provided_arg_stype_names = c_array(ctypes.c_char_p, provided_arg_stype_names)
-            provided_arg_stype_data = c_array(ctypes.c_int, provided_arg_stype_data)
+            provided_arg_stype_names = c_str_array(provided_arg_stype_names)
+            provided_arg_stype_data = c_array_buf(ctypes.c_int, array('i', provided_arg_stype_data))
 
         provided_arg_shape_data = []  # shape data
         # argument shape index in sdata,
@@ -1361,7 +1399,7 @@ class Symbol(SymbolBase):
             # if k not in listed_arguments and k not in listed_aux_states:
             #   raise ValueError('arg name %s is not valid', k)
             if isinstance(v, tuple):
-                provided_arg_shape_names.append(c_str(k))
+                provided_arg_shape_names.append(k)
                 provided_arg_shape_data.extend(v)
                 provided_arg_shape_idx.append(len(provided_arg_shape_data))
 
@@ -1372,11 +1410,11 @@ class Symbol(SymbolBase):
             if isinstance(grad_req, string_types):
                 # use provided_req_type_list_len = 0 to indicate this situation
                 provided_req_type_list_len = 0
-                provided_grad_req_types = [c_str(grad_req)]
+                provided_grad_req_types = [grad_req]
             elif isinstance(grad_req, list):
                 if len(grad_req) == 0:
                     raise RuntimeError('grad_req in simple_bind cannot be an empty list')
-                provided_grad_req_types = [c_str(item) for item in grad_req]
+                provided_grad_req_types = grad_req
                 provided_req_type_list_len = len(provided_grad_req_types)
             elif isinstance(grad_req, dict):
                 if len(grad_req) == 0:
@@ -1384,11 +1422,11 @@ class Symbol(SymbolBase):
                 provided_grad_req_names = []
                 provided_grad_req_types = []
                 for k, v in grad_req.items():
-                    provided_grad_req_names.append(c_str(k))
-                    provided_grad_req_types.append(c_str(v))
-                provided_grad_req_names = c_array(ctypes.c_char_p, provided_grad_req_names)
+                    provided_grad_req_names.append(k)
+                    provided_grad_req_types.append(v)
+                provided_grad_req_names = c_str_array(provided_grad_req_names)
                 provided_req_type_list_len = len(provided_grad_req_types)
-            provided_grad_req_types = c_array(ctypes.c_char_p, provided_grad_req_types)
+            provided_grad_req_types = c_str_array(provided_grad_req_types)
 
         num_ctx_map_keys = mx_uint(0)
         ctx_map_keys = ctypes.POINTER(ctypes.c_char_p)()
@@ -1399,20 +1437,20 @@ class Symbol(SymbolBase):
             ctx_map_dev_types = []
             ctx_map_dev_ids = []
             for key, val in group2ctx.items():
-                ctx_map_keys.append(c_str(key))
-                ctx_map_dev_types.append(ctypes.c_int(val.device_typeid))
-                ctx_map_dev_ids.append(ctypes.c_int(val.device_id))
+                ctx_map_keys.append(key)
+                ctx_map_dev_types.append(val.device_typeid)
+                ctx_map_dev_ids.append(val.device_id)
             num_ctx_map_keys = mx_uint(len(ctx_map_keys))
-            ctx_map_keys = c_array(ctypes.c_char_p, ctx_map_keys)
-            ctx_map_dev_types = c_array(ctypes.c_int, ctx_map_dev_types)
-            ctx_map_dev_ids = c_array(ctypes.c_int, ctx_map_dev_ids)
+            ctx_map_keys = c_str_array(ctx_map_keys)
+            ctx_map_dev_types = c_array(ctypes.c_int, array('i', ctx_map_dev_types))
+            ctx_map_dev_ids = c_array(ctypes.c_int, array('i', ctx_map_dev_ids))
 
         # prepare param names
         shared_arg_name_list = []
         if shared_arg_names is not None:
             if not isinstance(shared_arg_names, list):
                 raise ValueError('shared_arg_names in simple_bind must be a list or None')
-            shared_arg_name_list = [c_str(name) for name in shared_arg_names]
+            shared_arg_name_list = shared_arg_names
 
         # prepare shared_buffer
         if shared_buffer is None:
@@ -1422,16 +1460,14 @@ class Symbol(SymbolBase):
         else:
             if not isinstance(shared_buffer, dict):
                 raise ValueError('shared_buffer in simple_bind must be dict or None')
-            shared_buffer_names = []
-            shared_buffer_handles = []
-            for k, v in shared_buffer.items():
+            buffer_names = shared_buffer.keys()
+            buffer_arrays = shared_buffer.values()
+            for v in buffer_arrays:
                 assert(v.stype == 'default'), \
                     "shared_buffer is expected to only contain NDArrays with default storage"
-                shared_buffer_names.append(c_str(k))
-                shared_buffer_handles.append(v.handle)
-            shared_buffer_names = c_array(ctypes.c_char_p, shared_buffer_names)
-            shared_buffer_len = ctypes.c_int(len(shared_buffer_handles))
-            shared_buffer_handles = c_array(NDArrayHandle, shared_buffer_handles)
+            shared_buffer_names = c_str_array(buffer_names)
+            shared_buffer_len = ctypes.c_int(len(buffer_arrays))
+            shared_buffer_handles = c_handle_array(buffer_arrays)
         updated_shared_buffer_names = ctypes.POINTER(ctypes.c_char_p)()
         updated_shared_buffer_handles = ctypes.POINTER(NDArrayHandle)()
 
@@ -1460,9 +1496,11 @@ class Symbol(SymbolBase):
                                                  provided_grad_req_names,
                                                  provided_grad_req_types,
                                                  mx_uint(len(provided_arg_shape_names)),
-                                                 c_array(ctypes.c_char_p, provided_arg_shape_names),
-                                                 c_array(mx_uint, provided_arg_shape_data),
-                                                 c_array(mx_uint, provided_arg_shape_idx),
+                                                 c_str_array(provided_arg_shape_names),
+                                                 c_array_buf(mx_uint,
+                                                             array('I', provided_arg_shape_data)),
+                                                 c_array_buf(mx_uint,
+                                                             array('I', provided_arg_shape_idx)),
                                                  num_provided_arg_types,
                                                  provided_arg_type_names,
                                                  provided_arg_type_data,
@@ -1470,7 +1508,7 @@ class Symbol(SymbolBase):
                                                  provided_arg_stype_names,
                                                  provided_arg_stype_data,
                                                  mx_uint(len(shared_arg_name_list)),
-                                                 c_array(ctypes.c_char_p, shared_arg_name_list),
+                                                 c_str_array(shared_arg_name_list),
                                                  ctypes.byref(shared_buffer_len),
                                                  shared_buffer_names,
                                                  shared_buffer_handles,
@@ -1623,19 +1661,19 @@ class Symbol(SymbolBase):
         if isinstance(grad_req, string_types):
             if grad_req not in _GRAD_REQ_MAP:
                 raise ValueError('grad_req must be in %s' % str(_GRAD_REQ_MAP))
-            reqs_array = c_array(
-                mx_uint,
-                [mx_uint(_GRAD_REQ_MAP[grad_req])] * len(listed_arguments))
+            reqs_array = c_array_buf(mx_uint,
+                                     array('I', [_GRAD_REQ_MAP[grad_req]] * len(listed_arguments)))
         elif isinstance(grad_req, list):
-            reqs_array = c_array(mx_uint, [mx_uint(_GRAD_REQ_MAP[item]) for item in grad_req])
+            reqs_array = c_array_buf(mx_uint,
+                                     array('I', [_GRAD_REQ_MAP[item] for item in grad_req]))
         elif isinstance(grad_req, dict):
             req_array = []
             for name in listed_arguments:
                 if name in grad_req:
-                    req_array.append(mx_uint(_GRAD_REQ_MAP[grad_req[name]]))
+                    req_array.append(_GRAD_REQ_MAP[grad_req[name]])
                 else:
-                    req_array.append(mx_uint(0))
-            reqs_array = c_array(mx_uint, req_array)
+                    req_array.append(0)
+            reqs_array = c_array_buf(mx_uint, array('I', req_array))
 
         ctx_map_keys = []
         ctx_map_dev_types = []
@@ -1643,9 +1681,9 @@ class Symbol(SymbolBase):
 
         if group2ctx:
             for key, val in group2ctx.items():
-                ctx_map_keys.append(c_str(key))
-                ctx_map_dev_types.append(ctypes.c_int(val.device_typeid))
-                ctx_map_dev_ids.append(ctypes.c_int(val.device_id))
+                ctx_map_keys.append(key)
+                ctx_map_dev_types.append(val.device_typeid)
+                ctx_map_dev_ids.append(val.device_id)
 
         handle = ExecutorHandle()
         shared_handle = shared_exec.handle if shared_exec is not None else ExecutorHandle()
@@ -1653,9 +1691,9 @@ class Symbol(SymbolBase):
                                          ctypes.c_int(ctx.device_typeid),
                                          ctypes.c_int(ctx.device_id),
                                          mx_uint(len(ctx_map_keys)),
-                                         c_array(ctypes.c_char_p, ctx_map_keys),
-                                         c_array(ctypes.c_int, ctx_map_dev_types),
-                                         c_array(ctypes.c_int, ctx_map_dev_ids),
+                                         c_str_array(ctx_map_keys),
+                                         c_array_buf(ctypes.c_int, array('i', ctx_map_dev_types)),
+                                         c_array_buf(ctypes.c_int, array('i', ctx_map_dev_ids)),
                                          mx_uint(len(args)),
                                          args_handle,
                                          args_grad_handle,
@@ -1688,7 +1726,7 @@ class Symbol(SymbolBase):
             A gradient Symbol with returns to be the corresponding gradients.
         """
         handle = SymbolHandle()
-        c_wrt = c_array(ctypes.c_char_p, [c_str(key) for key in wrt])
+        c_wrt = c_str_array(wrt)
         check_call(_LIB.MXSymbolGrad(self.handle,
                                      mx_uint(len(wrt)),
                                      c_wrt,
@@ -1734,7 +1772,7 @@ class Symbol(SymbolBase):
         the result will be a list with one element.
         """
         if ctx is None:
-            ctx = Context.default_ctx
+            ctx = current_context()
         return self.bind(ctx, kwargs).forward()
 
     def reshape(self, *args, **kwargs):
@@ -1744,6 +1782,14 @@ class Symbol(SymbolBase):
         this array as data.
         """
         return op.reshape(self, *args, **kwargs)
+
+    def reshape_like(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`reshape_like`.
+
+        The arguments are the same as for :py:func:`reshape_like`, with
+        this array as data.
+        """
+        return op.reshape_like(self, *args, **kwargs)
 
     def astype(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`cast`.
@@ -1825,6 +1871,14 @@ class Symbol(SymbolBase):
         """
         return op.slice_axis(self, *args, **kwargs)
 
+    def slice_like(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`slice_like`.
+
+        The arguments are the same as for :py:func:`slice_like`, with
+        this array as data.
+        """
+        return op.slice_like(self, *args, **kwargs)
+
     def take(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`take`.
 
@@ -1881,6 +1935,14 @@ class Symbol(SymbolBase):
         """
         return op.argmax(self, *args, **kwargs)
 
+    def argmax_channel(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`argmax_channel`.
+
+        The arguments are the same as for :py:func:`argmax_channel`, with
+        this array as data.
+        """
+        return op.argmax_channel(self, *args, **kwargs)
+
     def argmin(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`argmin`.
 
@@ -1921,6 +1983,22 @@ class Symbol(SymbolBase):
         """
         return op.flatten(self, *args, **kwargs)
 
+    def shape_array(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`shape_array`.
+
+        The arguments are the same as for :py:func:`shape_op`, with
+        this array as data.
+        """
+        return op.shape_array(self, *args, **kwargs)
+
+    def size_array(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`size_array`.
+
+        The arguments are the same as for :py:func:`size_array`, with
+        this array as data.
+        """
+        return op.size_array(self, *args, **kwargs)
+
     def expand_dims(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`expand_dims`.
 
@@ -1936,6 +2014,14 @@ class Symbol(SymbolBase):
         this array as data.
         """
         return op.broadcast_to(self, *args, **kwargs)
+
+    def broadcast_like(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`broadcast_like`.
+
+        The arguments are the same as for :py:func:`broadcast_like`, with
+        this array as data.
+        """
+        return op.broadcast_like(self, *args, **kwargs)
 
     def tile(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`tile`.
@@ -1960,6 +2046,30 @@ class Symbol(SymbolBase):
         this array as data.
         """
         return op.flip(self, *args, **kwargs)
+
+    def depth_to_space(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`depth_to_space`.
+
+        The arguments are the same as for :py:func:`depth_to_space`, with
+        this array as data.
+        """
+        return op.depth_to_space(self, *args, **kwargs)
+
+    def space_to_depth(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`space_to_depth`.
+
+        The arguments are the same as for :py:func:`space_to_depth`, with
+        this array as data.
+        """
+        return op.space_to_depth(self, *args, **kwargs)
+
+    def diag(self, k=0, **kwargs):
+        """Convenience fluent method for :py:func:`diag`.
+
+        The arguments are the same as for :py:func:`diag`, with
+        this array as data.
+        """
+        return op.diag(self, k, **kwargs)
 
     def sum(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`sum`.
@@ -2249,6 +2359,22 @@ class Symbol(SymbolBase):
         """
         return op.rsqrt(self, *args, **kwargs)
 
+    def cbrt(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`cbrt`.
+
+        The arguments are the same as for :py:func:`cbrt`, with
+        this array as data.
+        """
+        return op.cbrt(self, *args, **kwargs)
+
+    def rcbrt(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`rcbrt`.
+
+        The arguments are the same as for :py:func:`rcbrt`, with
+        this array as data.
+        """
+        return op.rcbrt(self, *args, **kwargs)
+
     def square(self, *args, **kwargs):
         """Convenience fluent method for :py:func:`square`.
 
@@ -2256,6 +2382,54 @@ class Symbol(SymbolBase):
         this array as data.
         """
         return op.square(self, *args, **kwargs)
+
+    def reciprocal(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`reciprocal`.
+
+        The arguments are the same as for :py:func:`reciprocal`, with
+        this array as data.
+        """
+        return op.reciprocal(self, *args, **kwargs)
+
+    def relu(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`relu`.
+
+        The arguments are the same as for :py:func:`relu`, with
+        this array as data.
+        """
+        return op.relu(self, *args, **kwargs)
+
+    def sigmoid(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`sigmoid`.
+
+        The arguments are the same as for :py:func:`sigmoid`, with
+        this array as data.
+        """
+        return op.sigmoid(self, *args, **kwargs)
+
+    def softmax(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`softmax`.
+
+        The arguments are the same as for :py:func:`softmax`, with
+        this array as data.
+        """
+        return op.softmax(self, *args, **kwargs)
+
+    def log_softmax(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`log_softmax`.
+
+        The arguments are the same as for :py:func:`log_softmax`, with
+        this array as data.
+        """
+        return op.log_softmax(self, *args, **kwargs)
+
+    def squeeze(self, *args, **kwargs):
+        """Convenience fluent method for :py:func:`squeeze`.
+
+        The arguments are the same as for :py:func:`squeeze`, with
+        this array as data.
+        """
+        return op.squeeze(self, *args, **kwargs)
 
     def wait_to_read(self):
         raise NotImplementedForSymbol(self.wait_to_read, None)
@@ -2327,7 +2501,9 @@ def var(name, attr=None, shape=None, lr_mult=None, wd_mult=None, dtype=None,
     handle = SymbolHandle()
     check_call(_LIB.MXSymbolCreateVariable(c_str(name), ctypes.byref(handle)))
     ret = Symbol(handle)
-    attr = AttrScope.current.get(attr)
+    if not hasattr(AttrScope._current, "value"):
+        AttrScope._current.value = AttrScope()
+    attr = AttrScope._current.value.get(attr)
     attr = {} if attr is None else attr
     if shape is not None:
         attr['__shape__'] = str(shape)
@@ -2378,15 +2554,12 @@ def Group(symbols):
     sym : Symbol
         A group symbol.
      """
-    ihandles = []
-    for sym in symbols:
-        if not isinstance(sym, Symbol):
-            raise TypeError('Expected a list of symbols as input')
-        ihandles.append(sym.handle)
+    if not symbols or any(not isinstance(sym, Symbol) for sym in symbols):
+        raise TypeError('Expected a list of symbols as input')
     handle = SymbolHandle()
     check_call(_LIB.MXSymbolCreateGroup(
-        mx_uint(len(ihandles)),
-        c_array(SymbolHandle, ihandles), ctypes.byref(handle)))
+        mx_uint(len(symbols)),
+        c_handle_array(symbols), ctypes.byref(handle)))
     return Symbol(handle)
 
 
@@ -2627,6 +2800,30 @@ def hypot(left, right):
     else:
         raise TypeError('types (%s, %s) not supported' % (str(type(left)), str(type(right))))
 
+def eye(N, M=0, k=0, dtype=None, **kwargs):
+    """Returns a new symbol of 2-D shpae, filled with ones on the diagonal and zeros elsewhere.
+
+    Parameters
+    ----------
+    N: int
+        Number of rows in the output.
+    M: int, optional
+        Number of columns in the output. If 0, defaults to N.
+    k: int, optional
+        Index of the diagonal: 0 (the default) refers to the main diagonal,
+        a positive value refers to an upper diagonal,
+        and a negative value to a lower diagonal.
+    dtype : str or numpy.dtype, optional
+        The value type of the inner value, default to ``np.float32``.
+
+    Returns
+    -------
+    out : Symbol
+        The created Symbol.
+    """
+    if dtype is None:
+        dtype = _numpy.float32
+    return _internal._eye(N, M, k, dtype=dtype, **kwargs)
 
 def zeros(shape, dtype=None, **kwargs):
     """Returns a new symbol of given shape and type, filled with zeros.
@@ -2687,10 +2884,10 @@ def full(shape, val, dtype=None, **kwargs):
     """
     if dtype is None:
         dtype = _numpy.float32
-    return _internal._MulScalar(ones(shape=shape, dtype=dtype, **kwargs), scalar=val)
+    return _internal._full(shape=shape, dtype=dtype, value=float(val), **kwargs)
 
 # pylint: disable=redefined-outer-name
-def arange(start, stop=None, step=1.0, repeat=1, name=None, dtype=None):
+def arange(start, stop=None, step=1.0, repeat=1, infer_range=False, name=None, dtype=None):
     """Returns evenly spaced values within a given interval.
 
     Parameters
@@ -2715,6 +2912,31 @@ def arange(start, stop=None, step=1.0, repeat=1, name=None, dtype=None):
     if dtype is None:
         dtype = _numpy.float32
     return _internal._arange(start=start, stop=stop, step=step, repeat=repeat,
-                             name=name, dtype=dtype)
+                             infer_range=infer_range, name=name, dtype=dtype)
+
+def histogram(a, bins=10, range=None, **kwargs):
+    """Compute the histogram of the input data.
+
+    Parameters
+    ----------
+    a : NDArray
+        Input data. The histogram is computed over the flattened array.
+    bins : int or sequence of scalars
+        If bins is an int, it defines the number of equal-width bins in the
+        given range (10, by default). If bins is a sequence, it defines the bin edges,
+        including the rightmost edge, allowing for non-uniform bin widths.
+    range : (float, float), required if bins is an integer
+        The lower and upper range of the bins. If not provided, range is simply (a.min(), a.max()).
+        Values outside the range are ignored. The first element of the range must be less than or
+        equal to the second. range affects the automatic bin computation as well, the range will
+        be equally divided by the number of bins.
+    """
+    if isinstance(bins, Symbol):
+        return _internal._histogram(data=a, bins=bins, **kwargs)
+    elif isinstance(bins, integer_types):
+        if range is None:
+            raise ValueError("null range is not supported in symbol mode")
+        return _internal._histogram(data=a, bin_cnt=bins, range=range, **kwargs)
+    raise ValueError("bins argument should be either an integer or an NDArray")
 
 _set_symbol_class(Symbol)

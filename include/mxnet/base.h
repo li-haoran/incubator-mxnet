@@ -18,8 +18,9 @@
  */
 
 /*!
+ *  Copyright (c) 2015 by Contributors
  * \file base.h
- * \brief configuation of mxnet as well as basic data structure.
+ * \brief configuration of MXNet as well as basic data structure.
  */
 #ifndef MXNET_BASE_H_
 #define MXNET_BASE_H_
@@ -98,19 +99,10 @@
 #define MXNET_PREDICT_ONLY 0
 #endif
 
-/*!
- * \brief define operator message for profiler
- */
-#if MXNET_USE_PROFILER
-#define PROFILER_MESSAGE(msg)     msg
-#else
-#define PROFILER_MESSAGE(msg)     nullptr
-#endif
-
 /*! \brief major version */
-#define MXNET_MAJOR 0
+#define MXNET_MAJOR 1
 /*! \brief minor version */
-#define MXNET_MINOR 12
+#define MXNET_MINOR 3
 /*! \brief patch version */
 #define MXNET_PATCH 0
 /*! \brief mxnet version */
@@ -120,7 +112,7 @@
 /*!
  * \brief define function name as profiler message
  */
-#define PROFILER_MESSAGE_FUNCNAME PROFILER_MESSAGE(__FUNCTION__)
+#define PROFILER_MESSAGE_FUNCNAME (__FUNCTION__)
 
 /*! \brief namespace of mxnet */
 namespace mxnet {
@@ -143,7 +135,8 @@ struct Context {
   enum DeviceType {
     kCPU = cpu::kDevMask,
     kGPU = gpu::kDevMask,
-    kCPUPinned = 3
+    kCPUPinned = 3,
+    kCPUShared = 5,
   };
   /*! \brief the device type we run the op on */
   DeviceType dev_type;
@@ -155,9 +148,16 @@ struct Context {
    * \brief Get corresponding device mask
    * \return cpu::kDevMask or gpu::kDevMask
    */
-  inline int dev_mask() const {
-    if (dev_type == kCPUPinned) return cpu::kDevMask;
+  inline DeviceType dev_mask() const {
+    if (dev_type == kCPUPinned || dev_type == kCPUShared) return kCPU;
     return dev_type;
+  }
+  /*!
+   * \brief Returns dev_id for kGPU, 0 otherwise
+   */
+  inline int real_dev_id() const {
+    if (dev_type == kGPU) return dev_id;
+    return 0;
   }
   /*!
    * \brief Comparator, used to enable Context as std::map key.
@@ -200,7 +200,7 @@ struct Context {
     return true;
   }
   /*! \brief the maximal device type */
-  static const int32_t kMaxDevType = 4;
+  static const int32_t kMaxDevType = 6;
   /*! \brief the maximal device index */
   static const int32_t kMaxDevID = 16;
   /*!
@@ -218,17 +218,36 @@ struct Context {
    */
   inline static Context GPU(int32_t dev_id = -1);
   /*!
+   * Get the number of GPUs available.
+   * \return The number of GPUs that are available.
+   */
+  inline static int32_t GetGPUCount();
+  /*!
+   * \brief get the free and total available memory on a GPU
+   * \param dev the GPU number to query
+   * \param free_mem pointer to the integer holding free GPU memory
+   * \param total_mem pointer to the integer holding total GPU memory
+   * \return No return value
+   */
+  inline static void GetGPUMemoryInformation(int dev, int *free, int *total);
+  /*!
    * Create a pinned CPU context.
    * \param dev_id the device id for corresponding GPU.
    * \return Pinned CPU context. -1 for current GPU.
    */
   inline static Context CPUPinned(int32_t dev_id = -1);
   /*!
+   * Create a CPU shared memory context.
+   * \param dev_id dummy device id.
+   * \return CPU shared memory context.
+   */
+  inline static Context CPUShared(int32_t dev_id = 0);
+  /*!
    * Create a context from string of the format [cpu|gpu|cpu_pinned](n)
    * \param str the string pattern
    * \return Context
    */
-  inline static Context FromString(std::string str);
+  inline static Context FromString(const std::string& str);
 };
 
 /*!
@@ -273,7 +292,7 @@ inline Context Context::Create(DeviceType dev_type, int32_t dev_id) {
   ctx.dev_type = dev_type;
   if (dev_id < 0) {
     ctx.dev_id = 0;
-    if (dev_type != kCPU) {
+    if (dev_type & kGPU) {
 #if MXNET_USE_CUDA
       CHECK_EQ(cudaGetDevice(&ctx.dev_id), cudaSuccess);
 #else
@@ -293,19 +312,66 @@ inline Context Context::CPUPinned(int32_t dev_id) {
   return Create(kCPUPinned, dev_id);
 }
 
+inline Context Context::CPUShared(int32_t dev_id) {
+  return Create(kCPUShared, dev_id);
+}
+
 inline Context Context::GPU(int32_t dev_id) {
   return Create(kGPU, dev_id);
 }
 
-inline Context Context::FromString(std::string str) {
+inline int32_t Context::GetGPUCount() {
+#if MXNET_USE_CUDA
+  int32_t count;
+  cudaError_t e = cudaGetDeviceCount(&count);
+  if (e == cudaErrorNoDevice) {
+    return 0;
+  }
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+  return count;
+#else
+  return 0;
+#endif
+}
+
+inline void Context::GetGPUMemoryInformation(int dev, int *free_mem,
+                                             int *total_mem) {
+#if MXNET_USE_CUDA
+
+  size_t memF, memT;
+  cudaError_t e;
+
+  int curDevice;
+  e = cudaGetDevice(&curDevice);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaSetDevice(dev);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaMemGetInfo(&memF, &memT);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  e = cudaSetDevice(curDevice);
+  CHECK_EQ(e, cudaSuccess) << " CUDA: " << cudaGetErrorString(e);
+
+  *free_mem = static_cast<int>(memF);
+  *total_mem = static_cast<int>(memT);
+
+#else
+  LOG(FATAL)
+      << "This call is only supported for MXNet built with CUDA support.";
+#endif
+}
+
+inline Context Context::FromString(const std::string& str) {
   Context ret;
   try {
-    std::string::size_type l = str.find('(');
+    const std::string::size_type l = str.find('(');
     CHECK_NE(l, std::string::npos);
-    std::string::size_type r = str.find(')');
+    const std::string::size_type r = str.find(')');
     CHECK_EQ(r, str.length()-1);
 
-    std::string type = str.substr(0, l);
+    const std::string type = str.substr(0, l);
     int id = std::stoi(str.substr(l+1, r-l-1));
     if (type == "cpu") {
       ret = CPU(id);
@@ -313,6 +379,8 @@ inline Context Context::FromString(std::string str) {
       ret = GPU(id);
     } else if (type == "cpu_pinned") {
       ret = CPUPinned(id);
+    } else if (type == "cpu_shared") {
+      ret = CPUShared(id);
     } else {
       LOG(FATAL) << "Invalid context string " << str;
     }
@@ -329,6 +397,8 @@ inline std::ostream& operator<<(std::ostream &out, const Context &ctx) {
     out << "gpu(";
   } else if (ctx.dev_type == Context::kCPUPinned) {
     out << "cpu_pinned(";
+  } else if (ctx.dev_type == Context::kCPUShared) {
+    out << "cpu_shared(";
   } else {
     out << "unknown(";
   }
@@ -342,7 +412,22 @@ inline std::ostream& operator<<(std::ostream &out, const Context &ctx) {
 #define MXNET_DESCRIBE(...) describe(__VA_ARGS__ "\n\nFrom:" __FILE__ ":" STRINGIZE(__LINE__))
 #define ADD_FILELINE "\n\nDefined in " __FILE__ ":L" STRINGIZE(__LINE__)
 
+#if MXNET_USE_MKLDNN == 1
+constexpr size_t kMKLDNNAlign = 64;
+#endif
+
 }  // namespace mxnet
+
+namespace std {
+template<> struct hash<mxnet::Context> {
+  size_t operator()(const mxnet::Context& ctx) const {
+    size_t res = 0;
+    res = dmlc::HashCombine(res, static_cast<size_t>(ctx.dev_type));
+    res = dmlc::HashCombine(res, static_cast<size_t>(ctx.dev_id));
+    return res;
+  }
+};
+}
 
 #include "./tensor_blob.h"
 //! \endcond

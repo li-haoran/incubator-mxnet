@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2015 by Contributors
  * \file kvstore.h
  * \brief key-value store interface for mxnet
  */
@@ -30,12 +31,25 @@
 #include <string>
 #include <functional>
 #include <atomic>
+#include "../../src/kvstore/gradient_compression.h"
 #include "./ndarray.h"
 #if MXNET_USE_DIST_KVSTORE
 #include "ps/ps.h"
 #endif  // MXNET_USE_DIST_KVSTORE
 
 namespace mxnet {
+
+/*!
+ * \brief enum to denote types of commands kvstore sends to server regarding profiler
+ * kSetConfig sets profiler configs. Similar to mx.profiler.set_config()
+ * kState allows changing state of profiler to stop or run
+ * kPause allows pausing and resuming of profiler
+ * kDump asks profiler to dump output
+ */
+enum class KVStoreServerProfilerCommand {
+  kSetConfig, kState, kPause, kDump
+};
+
 /*!
  * \brief distributed key-value store
  *
@@ -63,6 +77,14 @@ class KVStore {
    * \brief return the type
    */
   inline const std::string& type() { return type_; }
+
+  /**
+   * \brief Set parameters to use low-bit compressed gradients
+   * \param compression_type type of compression
+   * \param threshold threshold for 2bit compression
+   */
+  virtual void SetGradientCompression(const std::vector<std::pair<std::string, std::string> >
+                                      & kwargs) = 0;
 
   /*!
    * \brief Initialize a list of key-value pair to the store.
@@ -160,19 +182,21 @@ class KVStore {
    * \param keys the list of keys
    * \param values the list of buffers for the pulled data, they should be preallocated
    * \param priority Priority of the action.
+   * \param ignore_sparse whether to ignore sparse arrays in the request
    */
   virtual void Pull(const std::vector<int>& keys,
                     const std::vector<NDArray*>& values,
-                    int priority = 0) = 0;
+                    int priority = 0, bool ignore_sparse = true) = 0;
   /*!
    * \brief pull a list of key-value pairs from the store
    * \param keys the list of keys in string format
    * \param values the list of buffers for the pulled data, they should be preallocated
    * \param priority Priority of the action.
+   * \param ignore_sparse whether to ignore sparse arrays in the request
    */
   virtual void Pull(const std::vector<std::string>& str_keys,
                     const std::vector<NDArray*>& values,
-                    int priority = 0) = 0;
+                    int priority = 0, bool ignore_sparse = true) = 0;
 
   /*!
    * \brief pull a list of key-value pairs from the store.
@@ -219,6 +243,7 @@ class KVStore {
     CHECK(updater) << "invalid updater";
     updater_ = updater;
   }
+
   /*!
    * \brief set an updater with string keys
    *
@@ -352,6 +377,20 @@ class KVStore {
   virtual void SendCommandToServers(int cmd_id, const std::string& cmd_body) { }
 
   /**
+   * \brief Sends server profiler commands to all server nodes
+   * Only the worker with rank=0 sends the command which will be received by all servers
+   * \param type ProfilerCommand type
+   * \param params parameters for that command in the form of a string
+   */
+  virtual void SetServerProfilerCommand(const KVStoreServerProfilerCommand type,
+                                        const std::string& params) {
+    LOG(INFO) << "Unable to pass server the profiler command. If you are using "
+              << "distributed kvstore, you need to compile with USE_DIST_KVSTORE=1."
+              << "If you are training on single machine, then there is no server process"
+              << "to profile. Please profile the worker process instead.";
+  }
+
+  /**
    * \brief the prototype of a server controller
    */
   typedef std::function<void(int, const std::string&)> Controller;
@@ -386,6 +425,12 @@ class KVStore {
    * \brief the kvstore type
    */
   std::string type_;
+
+  /** \brief Gradient compression object starts with GC_NONE mode
+   * Used if SetGradientCompression sets the type.
+   * Currently there is no support for un-setting gradient compression
+   */
+  std::shared_ptr<kvstore::GradientCompression> gradient_compression_;
 
   /**
    * \brief whether to do barrier when finalize

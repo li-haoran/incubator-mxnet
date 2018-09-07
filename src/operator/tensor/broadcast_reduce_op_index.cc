@@ -18,7 +18,8 @@
  */
 
 /*!
- * \file broadcast_reduce_op.cc
+ *  Copyright (c) 2016 by Contributors
+ * \file broadcast_reduce_op_index.cc
  * \brief CPU Implementation of broadcast and reduce functions.
  */
 #include "./broadcast_reduce_op.h"
@@ -136,6 +137,14 @@ Examples::
        [ 0.],
        [ 2.]]
 
+  // picks elements with specified indices along axis 1 using 'wrap' mode
+  // to place indicies that would normally be out of bounds
+  pick(x, y=[2,-1,-2], 1, mode='wrap') = [ 1.,  4.,  5.]
+
+  y = [[ 1.],
+       [ 0.],
+       [ 2.]]
+
   // picks elements with specified indices along axis 1 and dims are maintained
   pick(x,y, 1, keepdims=True) = [[ 2.],
                                  [ 3.],
@@ -154,8 +163,9 @@ Examples::
 .set_attr<FCompute>("FCompute<cpu>", PickOpForward<cpu>)
 .set_attr<nnvm::FGradient>("FGradient",
   [](const nnvm::NodePtr& n, const std::vector<nnvm::NodeEntry>& ograds) {
-    auto ret = MakeNonlossGradNode("_backward_pick", n, ograds,
-                                   {n->inputs[1]}, n->attrs.dict);
+    if (CheckGradAllZero(ograds)) return MakeZeroGradNodes(n, ograds);
+    auto ret = MakeGradNode("_backward_pick", n, {ograds[0], n->inputs[1]},
+                            n->attrs.dict);
     auto p = MakeNode("zeros_like", n->attrs.name + "_index_backward",
                       {n->inputs[1]}, nullptr, &n);
     ret.emplace_back(nnvm::NodeEntry{p, 0, 0});
@@ -163,7 +173,7 @@ Examples::
   })
 .add_argument("data", "NDArray-or-Symbol", "The input array")
 .add_argument("index", "NDArray-or-Symbol", "The index array")
-.add_arguments(ReduceAxisParam::__FIELDS__());
+.add_arguments(PickParam::__FIELDS__());
 
 
 NNVM_REGISTER_OP(_backward_pick)

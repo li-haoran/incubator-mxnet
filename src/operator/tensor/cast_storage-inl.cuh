@@ -28,6 +28,8 @@
 #include <cub/cub.cuh>
 #include <mxnet/base.h>
 #include <mxnet/operator.h>
+#include <nnvm/tuple.h>
+#include "./util/tensor_util-inl.h"
 #include "../mxnet_op.h"
 #include "./util/tensor_util-inl.cuh"
 
@@ -434,6 +436,8 @@ struct CastDnsCsrColIdxAndValsBlockKernel {
             nnz++;
           }
         }
+        // make sure k was updated using block_nnz in the previous iter
+        __syncthreads();
         if (threadIdx.x == kBaseThreadNum-1) {
           block_nnz = nnz;
         }

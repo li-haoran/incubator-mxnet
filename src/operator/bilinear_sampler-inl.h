@@ -18,6 +18,7 @@
  */
 
 /*!
+ * Copyright (c) 2017 by Contributors
  * \file bilinear_Sampler-inl.h
  * \brief
  * \author Xu Dong
@@ -43,7 +44,10 @@ enum BilinearSamplerOpOutputs {kOut, kTmp};
 }
 
 struct BilinearSamplerParam : public dmlc::Parameter<BilinearSamplerParam> {
+  dmlc::optional<bool> cudnn_off;
   DMLC_DECLARE_PARAMETER(BilinearSamplerParam) {
+    DMLC_DECLARE_FIELD(cudnn_off).set_default(dmlc::optional<bool>())
+        .describe("whether to turn cudnn off");
   }
 };
 

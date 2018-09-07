@@ -28,16 +28,16 @@ namespace mxnet {
 namespace op {
 
 NNVM_REGISTER_OP(_linalg_gemm)
-.set_attr<FCompute>("FCompute<gpu>", LaOpForward<gpu, 2, 2, 3, 1, gemm>);
+.set_attr<FCompute>("FCompute<gpu>", LaOpGemmForward<gpu, 2, 2, 3, 1, gemm>);
 
 NNVM_REGISTER_OP(_backward_linalg_gemm)
-.set_attr<FCompute>("FCompute<gpu>", LaOpBackward<gpu, 2, 2, 4, 3, gemm_backward>);
+.set_attr<FCompute>("FCompute<gpu>", LaOpGemmBackward<gpu, 2, 2, 4, 3, gemm_backward>);
 
 NNVM_REGISTER_OP(_linalg_gemm2)
-.set_attr<FCompute>("FCompute<gpu>", LaOpForward<gpu, 2, 2, 2, 1, gemm2>);
+.set_attr<FCompute>("FCompute<gpu>", LaOpGemmForward<gpu, 2, 2, 2, 1, gemm2>);
 
 NNVM_REGISTER_OP(_backward_linalg_gemm2)
-.set_attr<FCompute>("FCompute<gpu>", LaOpBackward<gpu, 2, 2, 3, 2, gemm2_backward>);
+.set_attr<FCompute>("FCompute<gpu>", LaOpGemmBackward<gpu, 2, 2, 3, 2, gemm2_backward>);
 
 NNVM_REGISTER_OP(_linalg_trmm)
 .set_attr<FCompute>("FCompute<gpu>", LaOpForward<gpu, 2, 2, 2, 1, trmm>);
@@ -82,6 +82,12 @@ NNVM_REGISTER_OP(_linalg_gelqf)
 
 NNVM_REGISTER_OP(_backward_linalg_gelqf)
 .set_attr<FCompute>("FCompute<gpu>", LaOpBackward<gpu, 2, 2, 4, 1, gelqf_backward>);
+
+NNVM_REGISTER_OP(_linalg_syevd)
+.set_attr<FCompute>("FCompute<gpu>", LaOpForwSyevd<gpu, syevd>);
+
+NNVM_REGISTER_OP(_backward_linalg_syevd)
+.set_attr<FCompute>("FCompute<gpu>", LaOpBackwSyevd<gpu, syevd_backward>);
 
 #endif
 

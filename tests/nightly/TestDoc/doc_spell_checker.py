@@ -21,6 +21,7 @@
     An exclude list is provided to avoid checking specific word,
     such as NDArray.
 """
+from __future__ import print_function
 
 import os
 import sys
@@ -31,8 +32,11 @@ from enchant.checker import SpellChecker
 import grammar_check
 import html2text
 
-reload(sys)
-sys.setdefaultencoding('utf-8')
+try:
+    reload(sys)  # Python 2
+    sys.setdefaultencoding('utf-8')
+except NameError:
+    pass         # Python 3
 
 
 GRAMMAR_CHECK_IGNORE = ['WHITESPACE_RULE', 'DOUBLE_PUNCTUATION', 'EN_QUOTES[1]',
@@ -92,7 +96,7 @@ def check_doc(file_content, spell_checker, spell_check_ret):
     """
     spell_checker.set_text(file_content)
     for error in spell_checker:
-        if spell_check_ret.has_key(error.word):
+        if error.word in spell_check_ret:
             spell_check_ret[error.word] += 1
         else:
             spell_check_ret[error.word] = 1
@@ -171,8 +175,8 @@ if __name__ == "__main__":
             spell_check_res = DOC_PARSER.get_res()[0]
             grammar_check_res = DOC_PARSER.get_res()[1]
             if len(spell_check_res) > 0:
-                print "%s has typo:" % os.path.join(root, read_file)
-                print "%s\n" % spell_check_res
+                print("%s has typo:" % os.path.join(root, read_file))
+                print("%s\n" % spell_check_res)
                 ALL_CLEAR = False
     if ALL_CLEAR:
-        print "No typo is found."
+        print("No typo is found.")

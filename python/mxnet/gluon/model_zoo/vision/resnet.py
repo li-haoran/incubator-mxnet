@@ -27,9 +27,12 @@ __all__ = ['ResNetV1', 'ResNetV2',
            'resnet18_v2', 'resnet34_v2', 'resnet50_v2', 'resnet101_v2', 'resnet152_v2',
            'get_resnet']
 
+import os
+
 from ....context import cpu
 from ...block import HybridBlock
 from ... import nn
+from .... import base
 
 # Helpers
 def _conv3x3(channels, stride, in_channels):
@@ -102,10 +105,10 @@ class BottleneckV1(HybridBlock):
     def __init__(self, channels, stride, downsample=False, in_channels=0, **kwargs):
         super(BottleneckV1, self).__init__(**kwargs)
         self.body = nn.HybridSequential(prefix='')
-        self.body.add(nn.Conv2D(channels//4, kernel_size=1, strides=1))
+        self.body.add(nn.Conv2D(channels//4, kernel_size=1, strides=stride))
         self.body.add(nn.BatchNorm())
         self.body.add(nn.Activation('relu'))
-        self.body.add(_conv3x3(channels//4, stride, channels//4))
+        self.body.add(_conv3x3(channels//4, 1, channels//4))
         self.body.add(nn.BatchNorm())
         self.body.add(nn.Activation('relu'))
         self.body.add(nn.Conv2D(channels, kernel_size=1, strides=1))
@@ -249,10 +252,9 @@ class ResNetV1(HybridBlock):
         with self.name_scope():
             self.features = nn.HybridSequential(prefix='')
             if thumbnail:
-                self.features.add(_conv3x3(channels[0], 1, 3))
+                self.features.add(_conv3x3(channels[0], 1, 0))
             else:
-                self.features.add(nn.Conv2D(channels[0], 7, 2, 3, use_bias=False,
-                                            in_channels=3))
+                self.features.add(nn.Conv2D(channels[0], 7, 2, 3, use_bias=False))
                 self.features.add(nn.BatchNorm())
                 self.features.add(nn.Activation('relu'))
                 self.features.add(nn.MaxPool2D(3, 2, 1))
@@ -261,10 +263,9 @@ class ResNetV1(HybridBlock):
                 stride = 1 if i == 0 else 2
                 self.features.add(self._make_layer(block, num_layer, channels[i+1],
                                                    stride, i+1, in_channels=channels[i]))
+            self.features.add(nn.GlobalAvgPool2D())
 
-            self.classifier = nn.HybridSequential(prefix='')
-            self.classifier.add(nn.GlobalAvgPool2D())
-            self.classifier.add(nn.Dense(classes, in_units=channels[-1]))
+            self.output = nn.Dense(classes, in_units=channels[-1])
 
     def _make_layer(self, block, layers, channels, stride, stage_index, in_channels=0):
         layer = nn.HybridSequential(prefix='stage%d_'%stage_index)
@@ -277,7 +278,7 @@ class ResNetV1(HybridBlock):
 
     def hybrid_forward(self, F, x):
         x = self.features(x)
-        x = self.classifier(x)
+        x = self.output(x)
 
         return x
 
@@ -307,10 +308,9 @@ class ResNetV2(HybridBlock):
             self.features = nn.HybridSequential(prefix='')
             self.features.add(nn.BatchNorm(scale=False, center=False))
             if thumbnail:
-                self.features.add(_conv3x3(channels[0], 1, 3))
+                self.features.add(_conv3x3(channels[0], 1, 0))
             else:
-                self.features.add(nn.Conv2D(channels[0], 7, 2, 3, use_bias=False,
-                                            in_channels=3))
+                self.features.add(nn.Conv2D(channels[0], 7, 2, 3, use_bias=False))
                 self.features.add(nn.BatchNorm())
                 self.features.add(nn.Activation('relu'))
                 self.features.add(nn.MaxPool2D(3, 2, 1))
@@ -321,13 +321,12 @@ class ResNetV2(HybridBlock):
                 self.features.add(self._make_layer(block, num_layer, channels[i+1],
                                                    stride, i+1, in_channels=in_channels))
                 in_channels = channels[i+1]
+            self.features.add(nn.BatchNorm())
+            self.features.add(nn.Activation('relu'))
+            self.features.add(nn.GlobalAvgPool2D())
+            self.features.add(nn.Flatten())
 
-            self.classifier = nn.HybridSequential(prefix='')
-            self.classifier.add(nn.BatchNorm())
-            self.classifier.add(nn.Activation('relu'))
-            self.classifier.add(nn.GlobalAvgPool2D())
-            self.classifier.add(nn.Flatten())
-            self.classifier.add(nn.Dense(classes, in_units=in_channels))
+            self.output = nn.Dense(classes, in_units=in_channels)
 
     def _make_layer(self, block, layers, channels, stride, stage_index, in_channels=0):
         layer = nn.HybridSequential(prefix='stage%d_'%stage_index)
@@ -340,7 +339,7 @@ class ResNetV2(HybridBlock):
 
     def hybrid_forward(self, F, x):
         x = self.features(x)
-        x = self.classifier(x)
+        x = self.output(x)
         return x
 
 
@@ -357,7 +356,8 @@ resnet_block_versions = [{'basic_block': BasicBlockV1, 'bottle_neck': Bottleneck
 
 
 # Constructor
-def get_resnet(version, num_layers, pretrained=False, ctx=cpu(), root='~/.mxnet/models', **kwargs):
+def get_resnet(version, num_layers, pretrained=False, ctx=cpu(),
+               root=os.path.join(base.data_dir(), 'models'), **kwargs):
     r"""ResNet V1 model from `"Deep Residual Learning for Image Recognition"
     <http://arxiv.org/abs/1512.03385>`_ paper.
     ResNet V2 model from `"Identity Mappings in Deep Residual Networks"
@@ -373,17 +373,22 @@ def get_resnet(version, num_layers, pretrained=False, ctx=cpu(), root='~/.mxnet/
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default $MXNET_HOME/models
         Location for keeping the model parameters.
     """
+    assert num_layers in resnet_spec, \
+        "Invalid number of layers: %d. Options are %s"%(
+            num_layers, str(resnet_spec.keys()))
     block_type, layers, channels = resnet_spec[num_layers]
+    assert version >= 1 and version <= 2, \
+        "Invalid resnet version: %d. Options are 1 and 2."%version
     resnet_class = resnet_net_versions[version-1]
     block_class = resnet_block_versions[version-1][block_type]
     net = resnet_class(block_class, layers, channels, **kwargs)
     if pretrained:
         from ..model_store import get_model_file
-        net.load_params(get_model_file('resnet%d_v%d'%(num_layers, version),
-                                       root=root), ctx=ctx)
+        net.load_parameters(get_model_file('resnet%d_v%d'%(num_layers, version),
+                                           root=root), ctx=ctx)
     return net
 
 def resnet18_v1(**kwargs):
@@ -396,7 +401,7 @@ def resnet18_v1(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(1, 18, **kwargs)
@@ -411,7 +416,7 @@ def resnet34_v1(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(1, 34, **kwargs)
@@ -426,7 +431,7 @@ def resnet50_v1(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(1, 50, **kwargs)
@@ -441,7 +446,7 @@ def resnet101_v1(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(1, 101, **kwargs)
@@ -456,7 +461,7 @@ def resnet152_v1(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(1, 152, **kwargs)
@@ -471,7 +476,7 @@ def resnet18_v2(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(2, 18, **kwargs)
@@ -486,7 +491,7 @@ def resnet34_v2(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(2, 34, **kwargs)
@@ -501,7 +506,7 @@ def resnet50_v2(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(2, 50, **kwargs)
@@ -516,7 +521,7 @@ def resnet101_v2(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(2, 101, **kwargs)
@@ -531,7 +536,7 @@ def resnet152_v2(**kwargs):
         Whether to load the pretrained weights for model.
     ctx : Context, default CPU
         The context in which to load the pretrained weights.
-    root : str, default '~/.mxnet/models'
+    root : str, default '$MXNET_HOME/models'
         Location for keeping the model parameters.
     """
     return get_resnet(2, 152, **kwargs)

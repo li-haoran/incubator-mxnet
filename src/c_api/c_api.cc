@@ -18,6 +18,7 @@
  */
 
 /*!
+ *  Copyright (c) 2015 by Contributors
  * \file c_api.cc
  * \brief C API of mxnet
  */
@@ -34,6 +35,7 @@
 #include <mxnet/c_api.h>
 #include <mxnet/kvstore.h>
 #include <mxnet/rtc.h>
+#include <mxnet/storage.h>
 #include <vector>
 #include <sstream>
 #include <string>
@@ -43,7 +45,7 @@
 #include <utility>
 #include "./c_api_common.h"
 #include "../operator/custom/custom-inl.h"
-#include "../engine/profiler.h"
+#include "../operator/tensor/matrix_op-inl.h"
 
 using namespace mxnet;
 
@@ -89,50 +91,40 @@ int MXRandomSeed(int seed) {
   API_END();
 }
 
+int MXRandomSeedContext(int seed, int dev_type, int dev_id) {
+  API_BEGIN();
+  Context ctx = Context::Create(static_cast<Context::DeviceType>(dev_type), dev_id);
+  mxnet::RandomSeed(ctx, seed);
+  API_END();
+}
+
 int MXNotifyShutdown() {
   API_BEGIN();
   Engine::Get()->NotifyShutdown();
   API_END();
 }
 
-int MXSetProfilerConfig(int mode, const char* filename) {
-  // mode, kOnlySymbolic: 0, kAllOperator: 1
-  API_BEGIN();
-#if MXNET_USE_PROFILER
-  engine::Profiler::Get()->SetConfig(engine::Profiler::ProfilerMode(mode), std::string(filename));
-#else
-  LOG(FATAL) << "Need to compile with USE_PROFILER=1 for MXNet Profiler";
-#endif
-  API_END();
-}
-
-int MXDumpProfile() {
-  API_BEGIN();
-#if MXNET_USE_PROFILER
-  engine::Profiler *profiler = engine::Profiler::Get();
-  CHECK(profiler->IsEnableOutput())
-    << "Profiler haven't been run. Config and start profiler first";
-  engine::Profiler::Get()->DumpProfile();
-#else
-  LOG(FATAL) << "Need to compile with USE_PROFILER=1 for MXNet Profiler";
-#endif
-  API_END()
-}
-
-int MXSetProfilerState(int state) {
-  // state, kNotRunning: 0, kRunning: 1
-  API_BEGIN();
-#if MXNET_USE_PROFILER
-  engine::Profiler::Get()->SetState(engine::Profiler::ProfilerState(state));
-#else
-  LOG(FATAL) << "Need to compile with USE_PROFILER=1 for MXNet Profiler";
-#endif
-  API_END();
-}
-
 int MXSetNumOMPThreads(int thread_num) {
   API_BEGIN();
   omp_set_num_threads(thread_num);
+  API_END();
+}
+
+int MXEngineSetBulkSize(int bulk_size, int* prev_bulk_size) {
+  API_BEGIN();
+  *prev_bulk_size = Engine::Get()->set_bulk_size(bulk_size);
+  API_END();
+}
+
+int MXGetGPUCount(int* out) {
+  API_BEGIN();
+  *out = Context::GetGPUCount();
+  API_END();
+}
+
+int MXGetGPUMemoryInformation(int dev, int *free_mem, int *total_mem) {
+  API_BEGIN();
+  Context::GetGPUMemoryInformation(dev, free_mem, total_mem);
   API_END();
 }
 
@@ -271,6 +263,13 @@ int MXNDArraySyncCopyFromNDArray(NDArrayHandle handle_dst,
   API_END();
 }
 
+int MXNDArraySyncCheckFormat(NDArrayHandle handle, const bool full_check) {
+  API_BEGIN();
+  NDArray *arr = static_cast<NDArray*>(handle);
+  arr->SyncCheckFormat(full_check);
+  API_END();
+}
+
 int MXNDArrayWaitToRead(NDArrayHandle handle) {
   API_BEGIN();
   static_cast<NDArray*>(handle)->WaitToRead();
@@ -324,6 +323,40 @@ int MXNDArrayLoad(const char* fname,
   std::vector<std::string> &names = ret->ret_vec_str;
   {
     std::unique_ptr<dmlc::Stream> fi(dmlc::Stream::Create(fname, "r"));
+    mxnet::NDArray::Load(fi.get(), &data, &names);
+  }
+  ret->ret_handles.resize(data.size());
+  for (size_t i = 0; i < data.size(); ++i) {
+    NDArray *ptr = new NDArray();
+    *ptr = data[i];
+    ret->ret_handles[i] = ptr;
+  }
+  ret->ret_vec_charp.resize(names.size());
+  for (size_t i = 0; i < names.size(); ++i) {
+    ret->ret_vec_charp[i] = names[i].c_str();
+  }
+  *out_size = static_cast<mx_uint>(data.size());
+  *out_arr = dmlc::BeginPtr(ret->ret_handles);
+  *out_name_size = static_cast<mx_uint>(names.size());
+  *out_names = dmlc::BeginPtr(ret->ret_vec_charp);
+  API_END();
+}
+
+int MXNDArrayLoadFromBuffer(const void *ndarray_buffer,
+                            size_t size,
+                            mx_uint *out_size,
+                            NDArrayHandle** out_arr,
+                            mx_uint *out_name_size,
+                            const char*** out_names) {
+  MXAPIThreadLocalEntry *ret = MXAPIThreadLocalStore::Get();
+  ret->ret_vec_str.clear();
+  API_BEGIN();
+  CHECK_NOTNULL(ndarray_buffer);
+  std::vector<NDArray> data;
+  std::vector<std::string> &names = ret->ret_vec_str;
+  {
+    std::unique_ptr<dmlc::MemoryFixedSizeStream> fi(new dmlc::MemoryFixedSizeStream(
+        const_cast<void*>(ndarray_buffer), size));
     mxnet::NDArray::Load(fi.get(), &data, &names);
   }
   ret->ret_handles.resize(data.size());
@@ -402,6 +435,23 @@ MXNET_DLL int MXNDArrayReshape(NDArrayHandle handle,
   if (pos >= 0) {
     new_shape[pos] = arr->shape().Size() / size;
   }
+  *ptr = arr->ReshapeWithRecord(new_shape);
+  *out = ptr;
+  API_END_HANDLE_ERROR(delete ptr);
+}
+
+MXNET_DLL int MXNDArrayReshape64(NDArrayHandle handle,
+                                 int ndim,
+                                 dim_t *dims,
+                                 bool reverse,
+                                 NDArrayHandle *out) {
+  NDArray *ptr = new NDArray();
+  API_BEGIN();
+  NDArray *arr = static_cast<NDArray*>(handle);
+  nnvm::Tuple<dim_t> shape(dims, dims+ndim);
+  CHECK_GT(arr->shape().Size(), 0) << "Source ndarray's shape is undefined. Input shape: "
+    << arr->shape();
+  TShape new_shape = mxnet::op::InferReshapeShape(shape, arr->shape(), reverse);
   *ptr = arr->ReshapeWithRecord(new_shape);
   *out = ptr;
   API_END_HANDLE_ERROR(delete ptr);
@@ -733,6 +783,20 @@ int MXKVStoreCreate(const char *type,
   API_END();
 }
 
+int MXKVStoreSetGradientCompression(KVStoreHandle handle, mx_uint num_params,
+                                    const char** keys, const char** vals) {
+  API_BEGIN();
+  std::vector<std::pair<std::string, std::string> > params;
+  for (mx_uint i = 0; i < num_params; ++i) {
+    std::pair<std::string, std::string> p;
+    p.first = keys[i];
+    p.second = vals[i];
+    params.push_back(p);
+  }
+  static_cast<KVStore*>(handle)->SetGradientCompression(params);
+  API_END();
+}
+
 int MXKVStoreFree(KVStoreHandle handle) {
   API_BEGIN();
   delete static_cast<KVStore*>(handle);
@@ -813,15 +877,15 @@ int MXKVStorePull(KVStoreHandle handle,
     v_keys[i] = keys[i];
     v_vals[i] = static_cast<NDArray*>(vals[i]);
   }
-  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority);
+  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority, true);
   API_END();
 }
 
 int MXKVStorePullEx(KVStoreHandle handle,
-                  mx_uint num,
-                  const char** keys,
-                  NDArrayHandle* vals,
-                  int priority) {
+                    mx_uint num,
+                    const char** keys,
+                    NDArrayHandle* vals,
+                    int priority) {
   API_BEGIN();
   std::vector<std::string> v_keys(num);
   std::vector<NDArray*> v_vals(num);
@@ -829,7 +893,41 @@ int MXKVStorePullEx(KVStoreHandle handle,
     v_keys[i] = keys[i];
     v_vals[i] = static_cast<NDArray*>(vals[i]);
   }
-  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority);
+  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority, true);
+  API_END();
+}
+
+int MXKVStorePullWithSparse(KVStoreHandle handle,
+                            mx_uint num,
+                            const int* keys,
+                            NDArrayHandle* vals,
+                            int priority,
+                            bool ignore_sparse) {
+  API_BEGIN();
+  std::vector<int> v_keys(num);
+  std::vector<NDArray*> v_vals(num);
+  for (mx_uint i = 0; i < num; ++i) {
+    v_keys[i] = keys[i];
+    v_vals[i] = static_cast<NDArray*>(vals[i]);
+  }
+  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority, ignore_sparse);
+  API_END();
+}
+
+int MXKVStorePullWithSparseEx(KVStoreHandle handle,
+                              mx_uint num,
+                              const char** keys,
+                              NDArrayHandle* vals,
+                              int priority,
+                              bool ignore_sparse) {
+  API_BEGIN();
+  std::vector<std::string> v_keys(num);
+  std::vector<NDArray*> v_vals(num);
+  for (mx_uint i = 0; i < num; ++i) {
+    v_keys[i] = keys[i];
+    v_vals[i] = static_cast<NDArray*>(vals[i]);
+  }
+  static_cast<KVStore*>(handle)->Pull(v_keys, v_vals, priority, ignore_sparse);
   API_END();
 }
 
@@ -1141,7 +1239,7 @@ int MXRtcFree(RtcHandle handle) {
 
 int MXCustomOpRegister(const char* op_type, CustomOpPropCreator creator) {
   API_BEGIN();
-  mxnet::op::custom::Registry::Get()->Register(op_type, creator);
+  mxnet::op::custom::CustomOperator::Get()->Register(op_type, creator);
   API_END();
 }
 
@@ -1150,24 +1248,24 @@ int MXRtcCudaModuleCreate(const char* source, int num_options,
                           const char** options, int num_exports,
                           const char** exports, CudaModuleHandle *out) {
   API_BEGIN();
-#if MXNET_USE_CUDA
+#if MXNET_USE_CUDA && MXNET_ENABLE_CUDA_RTC
   std::vector<std::string> str_opts;
   for (int i = 0; i < num_options; ++i) str_opts.emplace_back(options[i]);
   std::vector<std::string> str_exports;
   for (int i = 0; i < num_exports; ++i) str_exports.emplace_back(exports[i]);
   *out = new rtc::CudaModule(source, str_opts, str_exports);
 #else
-  LOG(FATAL) << "Compile with USE_CUDA=1 to use GPU.";
+  LOG(FATAL) << "Compile with USE_CUDA=1 and ENABLE_CUDA_RTC=1 to have CUDA runtime compilation.";
 #endif
   API_END();
 }
 
 int MXRtcCudaModuleFree(CudaModuleHandle handle) {
   API_BEGIN();
-#if MXNET_USE_CUDA
+#if MXNET_USE_CUDA && MXNET_ENABLE_CUDA_RTC
   delete reinterpret_cast<rtc::CudaModule*>(handle);
 #else
-  LOG(FATAL) << "Compile with USE_CUDA=1 to use GPU.";
+  LOG(FATAL) << "Compile with USE_CUDA=1 and ENABLE_CUDA_RTC=1 to have CUDA runtime compilation.";
 #endif
   API_END();
 }
@@ -1176,7 +1274,7 @@ int MXRtcCudaKernelCreate(CudaModuleHandle handle, const char* name, int num_arg
                           int* is_ndarray, int* is_const, int* arg_types,
                           CudaKernelHandle *out) {
   API_BEGIN();
-#if MXNET_USE_CUDA
+#if MXNET_USE_CUDA && MXNET_ENABLE_CUDA_RTC
   auto module = reinterpret_cast<rtc::CudaModule*>(handle);
   std::vector<rtc::CudaModule::ArgType> signature;
   for (int i = 0; i < num_args; ++i) {
@@ -1187,17 +1285,17 @@ int MXRtcCudaKernelCreate(CudaModuleHandle handle, const char* name, int num_arg
   auto kernel = module->GetKernel(name, signature);
   *out = new std::shared_ptr<rtc::CudaModule::Kernel>(kernel);
 #else
-  LOG(FATAL) << "Compile with USE_CUDA=1 to use GPU.";
+  LOG(FATAL) << "Compile with USE_CUDA=1 and ENABLE_CUDA_RTC=1 to have CUDA runtime compilation.";
 #endif
   API_END();
 }
 
 int MXRtcCudaKernelFree(CudaKernelHandle handle) {
   API_BEGIN();
-#if MXNET_USE_CUDA
+#if MXNET_USE_CUDA && MXNET_ENABLE_CUDA_RTC
   delete reinterpret_cast<std::shared_ptr<rtc::CudaModule::Kernel>*>(handle);
 #else
-  LOG(FATAL) << "Compile with USE_CUDA=1 to use GPU.";
+  LOG(FATAL) << "Compile with USE_CUDA=1 and ENABLE_CUDA_RTC=1 to have CUDA runtime compilation.";
 #endif
   API_END();
 }
@@ -1208,7 +1306,7 @@ int MXRtcCudaKernelCall(CudaKernelHandle handle, int dev_id, void** args,
                         mx_uint block_dim_y, mx_uint block_dim_z,
                         mx_uint shared_mem) {
   API_BEGIN();
-#if MXNET_USE_CUDA
+#if MXNET_USE_CUDA && MXNET_ENABLE_CUDA_RTC
   auto kernel = reinterpret_cast<std::shared_ptr<rtc::CudaModule::Kernel>*>(handle);
   const auto& signature = (*kernel)->signature();
   std::vector<dmlc::any> any_args;
@@ -1224,7 +1322,34 @@ int MXRtcCudaKernelCall(CudaKernelHandle handle, int dev_id, void** args,
   (*kernel)->Launch(Context::GPU(dev_id), any_args, grid_dim_x, grid_dim_y,
                     grid_dim_z, block_dim_x, block_dim_y, block_dim_z, shared_mem);
 #else
-  LOG(FATAL) << "Compile with USE_CUDA=1 to use GPU.";
+  LOG(FATAL) << "Compile with USE_CUDA=1 and ENABLE_CUDA_RTC=1 to have CUDA runtime compilation.";
 #endif
+  API_END();
+}
+
+int MXNDArrayGetSharedMemHandle(NDArrayHandle handle, int* shared_pid, int* shared_id) {
+  API_BEGIN();
+  NDArray* arr = reinterpret_cast<NDArray*>(handle);
+  Storage::Handle shandle;
+  if (arr->ctx().dev_type == Context::kCPUShared) {
+    arr->WaitToRead();
+    shandle = arr->storage_handle();
+    Storage::Get()->SharedIncrementRefCount(shandle);
+  } else {
+    NDArray new_arr(arr->shape(), Context::CPUShared(0), false, arr->dtype());
+    CopyFromTo(*arr, new_arr);
+    new_arr.WaitToRead();
+    shandle = new_arr.storage_handle();
+    Storage::Get()->SharedIncrementRefCount(shandle);
+  }
+  *shared_pid = shandle.shared_pid;
+  *shared_id = shandle.shared_id;
+  API_END();
+}
+
+int MXNDArrayCreateFromSharedMem(int shared_pid, int shared_id, const mx_uint *shape,
+                                 mx_uint ndim, int dtype, NDArrayHandle *out) {
+  API_BEGIN();
+  *out = new NDArray(shared_pid, shared_id, TShape(shape, shape + ndim), dtype);
   API_END();
 }

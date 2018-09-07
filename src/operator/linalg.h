@@ -64,6 +64,13 @@ void linalg_batch_gemm(const Tensor<xpu, 3, DType>& A, const Tensor<xpu, 3, DTyp
                        const Tensor<xpu, 3, DType>& C, DType alpha, DType beta,
                        bool tA, bool tB, Stream<xpu> *s = 0);
 
+// Version of batch gemmm where rows are indexed at axis 1 and columns at axis 3.
+template<typename xpu, typename DType>
+void linalg_batch_gemm(const Tensor<xpu, 4, DType>& A, const Tensor<xpu, 4, DType>& B,
+                       const Tensor<xpu, 4, DType>& C, DType alpha, DType beta,
+                       bool tA, bool tB, Stream<xpu> *s = 0);
+
+
 template<typename xpu, typename DType>
 inline void linalg_gemm(const Tensor<xpu, 2, DType>& A,
                         const Tensor<xpu, 2, DType>& B,
@@ -168,21 +175,21 @@ int linalg_gelqf_workspace_query(const Tensor<xpu, 2, DType>& A,
 // CPU/GPU-versions of LAPACK function "syevd". Please refer to the
 // LAPACK documentation for further details.
 // Note:
-// - The current implementation works for CPU only
 // - A is input and output parameter (overwritten by U)
 // - Input A is symmetric, we access the lower triangle only
-// - Requires two workspace arrays, one in DType, other in int.
 
 template<typename xpu, typename DType>
 void linalg_syevd(const Tensor<xpu, 2, DType>& A,
                   const Tensor<xpu, 1, DType>& L,
                   const Tensor<xpu, 1, DType>& work,
-                  const Tensor<xpu, 1, int>& iwork, Stream<xpu> *s = 0);
+                  Stream<xpu> *s = 0);
 
 // This function determines the amount of workspace needed for linalg_syevd
+// which is returned as number of elements of type DType.
 template<typename xpu, typename DType>
-void linalg_syevd_workspace_query(const Tensor<xpu, 2, DType>& A, int* lwork,
-                                  int* liwork, Stream<xpu> *s = 0);
+int linalg_syevd_workspace_query(const Tensor<xpu, 2, DType>& A,
+                                 const Tensor<xpu, 1, DType>& L,
+                                 Stream<xpu> *s = 0);
 
 #include "linalg_impl.h"
 

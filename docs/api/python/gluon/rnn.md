@@ -21,7 +21,7 @@ with model.name_scope():
     model.add(mx.gluon.rnn.LSTM(20))
     model.add(mx.gluon.nn.Dense(5, flatten=False))
 model.initialize()
-model(mx.nd.ones((2,3,5)))
+model(mx.nd.ones((2,3)))
 ```
 
 ```eval_rst
@@ -71,7 +71,7 @@ for i in range(5):
 
 ## API Reference
 
-<script type="text/javascript" src='../../_static/js/auto_module_index.js'></script>
+<script type="text/javascript" src='../../../_static/js/auto_module_index.js'></script>
 
 ```eval_rst
 .. automodule:: mxnet.gluon.rnn

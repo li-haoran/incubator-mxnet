@@ -165,7 +165,11 @@ class PandasLogger(object):
             param.eval_metric.reset()
         else:
             metrics = {}
-        speed = self.frequent / (now - self.last_time)
+        # #11504
+        try:
+            speed = self.frequent / (now - self.last_time)
+        except ZeroDivisionError:
+            speed = float('inf')
         metrics['batches_per_sec'] = speed * self.batch_size
         metrics['records_per_sec'] = speed
         metrics['elapsed'] = self.elapsed()
@@ -367,7 +371,7 @@ class LiveLearningCurve(LiveBokehChart):
             metrics = {}
         metrics['elapsed'] = datetime.datetime.now() - self.start_time
         for key, value in metrics.items():
-            if not self._data[df_name].has_key(key):
+            if key not in self._data[df_name]:
                 self._data[df_name][key] = []
             self._data[df_name][key].append(value)
 

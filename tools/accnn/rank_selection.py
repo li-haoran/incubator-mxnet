@@ -16,11 +16,13 @@
 # under the License.
 
 import numpy as np
-import mxnet as mx
 import json
 import utils
 import math
 import sys
+
+from six.moves import xrange
+
 
 def calc_complexity(ishape, node):
   y, x = map(int, eval(node['param']['kernel']))
@@ -81,7 +83,7 @@ def get_ranksel(model, ratio):
         if nxt_c > EC:
           continue
         nxt_v = dp[now][now_c] + math.log(S[i][d])
-        if dp[nxt].has_key(nxt_c):
+        if nxt_c in dp[nxt]:
           if nxt_v > dp[nxt][nxt_c]:
             dp[nxt][nxt_c] = nxt_v
             dpc[i][nxt_c] = (d,now_c)

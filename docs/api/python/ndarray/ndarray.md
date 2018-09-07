@@ -124,10 +124,14 @@ The `ndarray` package provides several classes:
     :nosignatures:
 
     NDArray.T
+    NDArray.shape_array
+    NDArray.size_array
     NDArray.reshape
+    NDArray.reshape_like
     NDArray.flatten
     NDArray.expand_dims
     NDArray.split
+    NDArray.diag
 ```
 
 ### Array expand elements
@@ -138,6 +142,7 @@ The `ndarray` package provides several classes:
 
     NDArray.broadcast_to
     NDArray.broadcast_axes
+    NDArray.broadcast_like
     NDArray.tile
     NDArray.pad
 ```
@@ -151,6 +156,8 @@ The `ndarray` package provides several classes:
     NDArray.transpose
     NDArray.swapaxes
     NDArray.flip
+    NDArray.depth_to_space
+    NDArray.space_to_depth
 ```
 
 ### Array reduction
@@ -194,6 +201,7 @@ The `ndarray` package provides several classes:
     NDArray.topk
     NDArray.argmax
     NDArray.argmin
+    NDArray.argmax_channel
 ```
 
 ### Arithmetic operations
@@ -266,7 +274,22 @@ The `ndarray` package provides several classes:
 
     NDArray.sqrt
     NDArray.rsqrt
+    NDArray.cbrt
+    NDArray.rcbrt
     NDArray.square
+    NDArray.reciprocal
+```
+
+## Basic neural network functions
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    NDArray.relu
+    NDArray.sigmoid
+    NDArray.softmax
+    NDArray.log_softmax
 ```
 
 ### In-place arithmetic operations
@@ -306,6 +329,7 @@ The `ndarray` package provides several classes:
     NDArray.__setitem__
     NDArray.slice
     NDArray.slice_axis
+    NDArray.slice_like
     NDArray.take
     NDArray.one_hot
     NDArray.pick
@@ -344,6 +368,7 @@ The `ndarray` package provides several classes:
     ones_like
     full
     arange
+    diag
     load
     save
 ```
@@ -357,7 +382,10 @@ The `ndarray` package provides several classes:
     :nosignatures:
 
     cast
+    shape_array
+    size_array
     reshape
+    reshape_like
     flatten
     expand_dims
 ```
@@ -370,6 +398,7 @@ The `ndarray` package provides several classes:
 
     broadcast_to
     broadcast_axes
+    broadcast_like
     repeat
     tile
     pad
@@ -384,6 +413,8 @@ The `ndarray` package provides several classes:
     transpose
     swapaxes
     flip
+    depth_to_space
+    space_to_depth
 ```
 
 ### Joining and splitting arrays
@@ -394,6 +425,7 @@ The `ndarray` package provides several classes:
 
     concat
     split
+    stack
 ```
 
 ### Indexing routines
@@ -404,11 +436,14 @@ The `ndarray` package provides several classes:
 
     slice
     slice_axis
+    slice_like
     take
     batch_take
     one_hot
     pick
     where
+    ravel_multi_index
+    unravel_index
 ```
 
 ## Mathematical functions
@@ -514,11 +549,13 @@ The `ndarray` package provides several classes:
     power
     sqrt
     rsqrt
+    cbrt
+    rcbrt
     square
     reciprocal
 ```
 
-### Logic functions
+### Comparison
 
 ```eval_rst
 .. autosummary::
@@ -532,19 +569,33 @@ The `ndarray` package provides several classes:
     lesser_equal
 ```
 
+### Logical operators
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    logical_and
+    logical_or
+    logical_xor
+    logical_not
+```
+
 ### Random sampling
 
 ```eval_rst
 .. autosummary::
     :nosignatures:
 
-    sample_uniform
-    sample_normal
-    sample_gamma
-    sample_exponential
-    sample_poisson
-    sample_negative_binomial
-    sample_generalized_negative_binomial
+    mxnet.ndarray.random.uniform
+    mxnet.ndarray.random.normal
+    mxnet.ndarray.random.gamma
+    mxnet.ndarray.random.exponential
+    mxnet.ndarray.random.poisson
+    mxnet.ndarray.random.negative_binomial
+    mxnet.ndarray.random.generalized_negative_binomial
+    mxnet.ndarray.random.multinomial
+    mxnet.ndarray.random.shuffle
     mxnet.random.seed
 ```
 
@@ -559,6 +610,17 @@ The `ndarray` package provides several classes:
     argsort
     argmax
     argmin
+```
+
+### Sequence operation
+
+```eval_rst
+.. autosummary::
+    :nosignatures:
+
+    SequenceLast
+    SequenceMask
+    SequenceReverse
 ```
 
 ### Miscellaneous
@@ -592,6 +654,8 @@ The `ndarray` package provides several classes:
     SoftmaxOutput
     softmax
     log_softmax
+    relu
+    sigmoid
 ```
 
 ### More
@@ -606,6 +670,7 @@ The `ndarray` package provides several classes:
     Embedding
     LeakyReLU
     InstanceNorm
+    LayerNorm
     L2Normalization
     LRN
     ROIPooling

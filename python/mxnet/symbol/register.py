@@ -113,9 +113,13 @@ def %s(*%s, **kwargs):"""%(func_name, arr_name))
             dtype_name, dtype_name, dtype_name))
             code.append("""
     attr = kwargs.pop('attr', None)
-    kwargs.update(AttrScope.current.get(attr))
+    if not hasattr(AttrScope._current, "value"):
+        AttrScope._current.value = AttrScope()
+    kwargs.update(AttrScope._current.value.get(attr))
     name = kwargs.pop('name', None)
-    name = NameManager.current.get(name, '%s')
+    if not hasattr(NameManager._current, "value"):
+        NameManager._current.value = NameManager()
+    name = NameManager._current.value.get(name, '%s')
     _ = kwargs.pop('out', None)
     keys = []
     vals = []
@@ -126,7 +130,7 @@ def %s(*%s, **kwargs):"""%(func_name, arr_name))
         else:
             keys.append(k)
             vals.append(v)"""%(func_name.lower()))
-            if key_var_num_args:
+            if key_var_num_args: # pylint: disable=using-constant-test
                 code.append("""
     if '%s' not in kwargs:
         keys.append('%s')
@@ -141,16 +145,18 @@ def %s(*%s, **kwargs):"""%(func_name, arr_name))
 def %s(%s):"""%(func_name, ', '.join(signature)))
         if not signature_only:
             code.append("""
-    kwargs.update(AttrScope.current.get(attr))
+    if not hasattr(AttrScope._current, "value"):
+        AttrScope._current.value = AttrScope()
+    kwargs.update(AttrScope._current.value.get(attr))
     sym_kwargs = dict()
-    keys = []
-    vals = []
-    for k, v in kwargs.items():
-        if isinstance(v, SymbolBase):
-            sym_kwargs[k] = v
+    _keys = []
+    _vals = []
+    for _k, _v in kwargs.items():
+        if isinstance(_v, SymbolBase):
+            sym_kwargs[_k] = _v
         else:
-            keys.append(k)
-            vals.append(v)""")
+            _keys.append(_k)
+            _vals.append(_v)""")
             # NDArray args
             for name in ndarg_names: # pylint: disable=redefined-argument-from-local
                 code.append("""
@@ -162,18 +168,20 @@ def %s(%s):"""%(func_name, ', '.join(signature)))
             for name in kwarg_names: # pylint: disable=redefined-argument-from-local
                 code.append("""
     if %s is not _Null:
-        keys.append('%s')
-        vals.append(%s)"""%(name, name, name))
+        _keys.append('%s')
+        _vals.append(%s)"""%(name, name, name))
             # dtype
             if dtype_name is not None:
                 code.append("""
     if %s is not _Null:
-        keys.append('%s')
-        vals.append(np.dtype(%s).name)"""%(dtype_name, dtype_name, dtype_name))
+        _keys.append('%s')
+        _vals.append(np.dtype(%s).name)"""%(dtype_name, dtype_name, dtype_name))
 
             code.append("""
-    name = NameManager.current.get(name, '%s')
-    return _symbol_creator(%d, None, sym_kwargs, keys, vals, name)"""%(
+    if not hasattr(NameManager._current, "value"):
+        NameManager._current.value = NameManager()
+    name = NameManager._current.value.get(name, '%s')
+    return _symbol_creator(%d, None, sym_kwargs, _keys, _vals, name)"""%(
         func_name.lower(), handle.value))
 
     if signature_only:
